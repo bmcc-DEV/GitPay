@@ -1,0 +1,5 @@
+node_modules/
+# Keep compiled minified file, ignore source bundle mapping if desired
+js/bitcoin.js
+.DS_Store
+*.log

@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitPay - Sovereign Bitcoin Payment Gateway</title>
+  <meta name="description" content="GitPay is a zero-cost, non-custodial Bitcoin invoice processor running entirely on GitHub Pages, Issues, and Actions.">
+  
+  <!-- CSS -->
+  <link rel="stylesheet" href="style.css">
+  
+  <!-- Libraries -->
+  <!-- Our compiled BIP32/BitcoinJS library -->
+  <script src="js/bitcoin.min.js"></script>
+  <!-- QRCode.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body>
+
+  <!-- Merchant Header (Hidden in Customer/Pay mode) -->
+  <header id="merchant-header">
+    <div class="header-container">
+      <a href="./" class="logo">
+        <!-- SVG Bitcoin icon -->
+        <svg width="32" height="32" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="32" cy="32" r="32" fill="#F7931A"/>
+          <path d="M46.109 27.423c.642-4.298-2.628-6.61-7.1-8.154l1.45-5.816-3.539-.882-1.412 5.666c-.93-.232-1.886-.451-2.836-.669l1.424-5.714-3.539-.882-1.45 5.817c-.77-.176-1.514-.347-2.24-.527l.004-.018-4.88-1.218-.942 3.78s2.625.602 2.57.64c1.433.357 2.115 1.304 2.062 2.056l-2.065 8.283c.124.031.285.077.462.147-.149-.037-.308-.077-.422-.11l-2.895 11.609c-.175.435-.62 1.088-1.623.839.036.052-2.572-.642-2.572-.642l-1.758 4.056 4.605 1.148c.857.214 1.7.438 2.528.647l-1.464 5.877 3.538.882 1.45-5.823c.968.263 1.91.5 2.827.72l-1.436 5.753 3.539.882 1.465-5.882c6.04 1.143 10.583.682 12.493-4.783 1.542-4.402-.077-6.94-3.257-8.591 2.316-.535 4.06-2.06 4.524-5.215zm-8.083 11.378c-1.096 4.402-8.508 2.023-10.913 1.424l1.947-7.811c2.405.6 10.096 1.785 8.966 6.387zm1.097-11.438c-1.0 4.01-7.18 1.974-9.18 1.477l1.766-7.086c2 .5 8.435 1.434 7.414 5.609z" fill="white"/>
+        </svg>
+        <span class="logo-text">GitPay</span>
+        <span class="logo-badge">Beta</span>
+      </a>
+      <nav>
+        <button id="nav-dashboard" class="nav-btn active" onclick="switchTab('dashboard')">
+          <i data-lucide="layout-dashboard"></i> Dashboard
+        </button>
+        <button id="nav-create" class="nav-btn" onclick="switchTab('create')">
+          <i data-lucide="plus-circle"></i> Create Invoice
+        </button>
+        <button id="nav-settings" class="nav-btn" onclick="switchTab('settings')">
+          <i data-lucide="settings"></i> Settings
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main id="main-content">
+    
+    <!-- Setup Overlay Alert (Prompt to configure first) -->
+    <div id="setup-warning-card" class="setup-warning" style="display: none;">
+      <i data-lucide="alert-triangle"></i>
+      <div>
+        <h4>Configuration Required</h4>
+        <p>GitPay is not configured yet. Go to <a href="#" onclick="switchTab('settings')">Settings</a> to enter your GitHub token, repository, and Bitcoin extended public key (xpub/ypub/zpub) to start processing payments.</p>
+      </div>
+    </div>
+
+    <!-- ================= MERCHANT VIEW ================= -->
+    
+    <!-- View 1: Dashboard -->
+    <section id="view-dashboard" class="view-section active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-icon success">
+            <i data-lucide="check-circle-2"></i>
+          </div>
+          <div class="stat-info">
+            <span class="stat-label">Paid Invoices</span>
+            <span id="stat-paid-count" class="stat-value">0</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">
+            <i data-lucide="clock"></i>
+          </div>
+          <div class="stat-info">
+            <span class="stat-label">Pending</span>
+            <span id="stat-pending-count" class="stat-value">0</span>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon danger">
+            <i data-lucide="x-circle"></i>
+          </div>
+          <div class="stat-info">
+            <span class="stat-label">Expired</span>
+            <span id="stat-expired-count" class="stat-value">0</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="glass-card">
+        <div class="card-title" style="justify-content: space-between; border-bottom: none; margin-bottom: 0;">
+          <h2 style="display: flex; align-items: center; gap: 0.75rem;">
+            <i data-lucide="receipt"></i> Recent Invoices
+          </h2>
+          <button id="btn-sync-invoices" class="btn" onclick="syncInvoicesList()">
+            <i data-lucide="rotate-cw"></i> Sync Now
+          </button>
+        </div>
+
+        <div class="table-container">
+          <table id="invoices-table">
+            <thead>
+              <tr>
+                <th>Issue #</th>
+                <th>Description</th>
+                <th>Address</th>
+                <th class="text-right">Amount (sats)</th>
+                <th class="text-center">Status</th>
+                <th>Created At</th>
+                <th class="text-center">Action</th>
+              </tr>
+            </thead>
+            <tbody id="invoices-list-body">
+              <tr>
+                <td colspan="7" class="text-center" style="color: var(--text-muted); padding: 3rem;">
+                  <i data-lucide="loader-2" style="animation: spin 1s infinite linear; margin-bottom: 0.5rem; display: block; margin-left: auto; margin-right: auto; width: 24px; height: 24px;"></i>
+                  Loading invoices from your GitHub repository...
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- View 2: Create Invoice -->
+    <section id="view-create" class="view-section">
+      <div class="glass-card" style="max-width: 600px; margin: 0 auto;">
+        <h2 class="card-title"><i data-lucide="plus-circle"></i> Create Bitcoin Invoice</h2>
+        
+        <form id="create-invoice-form" onsubmit="handleCreateInvoice(event)">
+          <div class="form-group">
+            <label class="form-label" for="invoice-amount-fiat">Amount</label>
+            <div class="input-wrapper">
+              <i class="input-icon" id="fiat-symbol-icon">$</i>
+              <input type="number" step="any" id="invoice-amount-fiat" class="form-input" placeholder="0.00" oninput="convertFiatToSats()" required>
+            </div>
+            <span class="form-helper">Enter amount to convert to Satoshis.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="invoice-amount-sats">Amount in Satoshis (sats)</label>
+            <div class="input-wrapper">
+              <i class="input-icon">🪙</i>
+              <input type="number" id="invoice-amount-sats" class="form-input" placeholder="0" oninput="convertSatsToFiat()" required>
+            </div>
+            <div class="converter-preview">
+              <i data-lucide="info" style="width: 14px; height: 14px;"></i> 
+              <span id="btc-equivalent-value">0.00000000 BTC</span>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="invoice-description">Description</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="file-text"></i>
+              <input type="text" id="invoice-description" class="form-input" placeholder="e.g. Website development, Coffee" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="invoice-index">Derivation Index (Optional)</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="hash"></i>
+              <input type="number" id="invoice-index" class="form-input" placeholder="Auto-detects next available">
+            </div>
+            <span class="form-helper">Leave empty to automatically detect and derive the next unused address index from your xpub history.</span>
+          </div>
+
+          <button type="submit" id="btn-submit-invoice" class="btn btn-primary" style="width: 100%;">
+            <i data-lucide="sparkles"></i> Generate Invoice & Publish
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- View 3: Settings -->
+    <section id="view-settings" class="view-section">
+      <div class="glass-card" style="max-width: 650px; margin: 0 auto;">
+        <h2 class="card-title"><i data-lucide="settings"></i> Gateway Settings</h2>
+        
+        <form id="settings-form" onsubmit="handleSaveSettings(event)">
+          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; letter-spacing: 0.05em;">GitHub Configuration</h3>
+          
+          <div class="form-group">
+            <label class="form-label" for="setting-gh-token">Personal Access Token (PAT)</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="key"></i>
+              <input type="password" id="setting-gh-token" class="form-input" placeholder="ghp_..." required>
+            </div>
+            <span class="form-helper">Requires a token with <code>repo</code> (or <code>public_repo</code>) permission to write issues and labels. Saved securely in local storage.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-gh-repo">Repository Path</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="github"></i>
+              <input type="text" id="setting-gh-repo" class="form-input" placeholder="yourusername/yourrepo" required>
+            </div>
+            <span class="form-helper">The owner/repo combination where invoice Issues will be published. (e.g. <code>satoshi/gitpay</code>)</span>
+          </div>
+
+          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Bitcoin Wallet</h3>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-extended-key">Extended Public Key (xpub / ypub / zpub / tpub / upub / vpub)</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="wallet"></i>
+              <input type="text" id="setting-extended-key" class="form-input" placeholder="zpub..." required>
+            </div>
+            <span class="form-helper">Your master public key. Support for: <code>xpub</code> (Legacy), <code>ypub</code> (Nested SegWit), <code>zpub</code> (Native SegWit), and testnet prefixes (<code>tpub/upub/vpub</code>).</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-network">Network Mode</label>
+            <select id="setting-network" class="form-input" required>
+              <option value="mainnet">Bitcoin Mainnet (xpub, ypub, zpub)</option>
+              <option value="testnet">Bitcoin Testnet (tpub, upub, vpub)</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-fiat-currency">Fiat Currency (for conversions)</label>
+            <select id="setting-fiat-currency" class="form-input" required>
+              <option value="USD">United States Dollar (USD - $)</option>
+              <option value="BRL">Brazilian Real (BRL - R$)</option>
+              <option value="EUR">Euro (EUR - €)</option>
+              <option value="GBP">British Pound (GBP - £)</option>
+            </select>
+          </div>
+
+          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Security & Advanced</h3>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-master-key">Merchant Master Encryption Key (Hex)</label>
+            <div class="input-wrapper" style="gap: 0.5rem; display: flex; width: 100%;">
+              <div style="flex: 1; position: relative;">
+                <i class="input-icon" data-lucide="shield-check"></i>
+                <input type="text" id="setting-master-key" class="form-input" style="padding-left: 2.75rem;" placeholder="Automatic 32-byte hex key..." required>
+              </div>
+              <button type="button" class="btn" style="padding: 0.75rem;" onclick="triggerGenerateNewMasterKey()" title="Generate New Key">
+                <i data-lucide="refresh-cw"></i>
+              </button>
+            </div>
+            <span class="form-helper">This key encrypts your invoice descriptions on GitHub. **Back it up!** Without it, you cannot read invoice descriptions on other devices or if you clear browser data.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-tolerance">Payment Tolerance (%)</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="percent"></i>
+              <input type="number" step="0.1" min="90" max="100" id="setting-tolerance" class="form-input" placeholder="99.5" required>
+            </div>
+            <span class="form-helper">The percentage of the invoice value that must be received to mark it as fully paid (e.g. 99.5% tolerates small wallet fee deductions).</span>
+          </div>
+
+          <button type="submit" id="btn-save-settings" class="btn btn-success" style="width: 100%;">
+            <i data-lucide="save"></i> Save Configuration
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ================= CUSTOMER PAYMENT VIEW ================= -->
+    <section id="view-customer" class="view-section">
+      <div class="customer-container">
+        
+        <!-- Loading state -->
+        <div id="customer-loading" class="glass-card text-center" style="padding: 4rem 2rem;">
+          <i data-lucide="loader-2" style="animation: spin 1s infinite linear; margin-bottom: 1rem; width: 40px; height: 40px; color: var(--accent-color); margin-left: auto; margin-right: auto;"></i>
+          <h3>Retrieving Invoice...</h3>
+          <p style="color: var(--text-secondary); margin-top: 0.5rem;">Connecting to the ledger and fetching payment details.</p>
+        </div>
+
+        <!-- Error state -->
+        <div id="customer-error" class="glass-card text-center" style="display: none; padding: 3rem 2rem;">
+          <i data-lucide="x-circle" style="width: 48px; height: 48px; color: var(--danger-color); margin-bottom: 1rem; margin-left: auto; margin-right: auto;"></i>
+          <h3 id="customer-error-title">Invoice Not Found</h3>
+          <p id="customer-error-desc" style="color: var(--text-secondary); margin-top: 0.5rem; margin-bottom: 2rem;">We could not fetch the details for this invoice. Please check the URL or contact the merchant.</p>
+          <a href="./" class="btn">Back to Dashboard</a>
+        </div>
+
+        <!-- Payment Screen -->
+        <div id="customer-pay-card" class="glass-card pay-card" style="display: none;">
+          <div class="pay-header">
+            <span id="pay-merchant" class="pay-merchant-name">GitPay Store</span>
+            <h2 id="pay-description" class="pay-desc">Invoice Payment</h2>
+          </div>
+
+          <div class="amount-box">
+            <div id="pay-amount-sats" class="amount-sats">0</div>
+            <div class="amount-btc">satoshis &nbsp;≈&nbsp; <span id="pay-amount-btc" style="color: var(--text-primary); font-weight: 600;">0.00000000</span> BTC</div>
+          </div>
+
+          <div class="qr-wrapper">
+            <div id="qrcode">
+              <div class="qr-placeholder">
+                <i data-lucide="qr-code" style="width: 48px; height: 48px; color: var(--text-muted);"></i>
+              </div>
+            </div>
+          </div>
+
+          <div class="addr-box">
+            <span id="pay-address" class="addr-text">bitcoin:bc1q...</span>
+            <button class="copy-btn" onclick="copyAddressToClipboard()" title="Copy Address">
+              <i data-lucide="copy" id="copy-icon"></i>
+            </button>
+          </div>
+
+          <div class="timer-box" id="pay-timer-container">
+            <i data-lucide="hourglass"></i>
+            <span>Invoice expires in:</span>
+            <span id="pay-timer-val" class="timer-val">15:00</span>
+          </div>
+
+          <div id="pay-status-indicator" class="status-box">
+            <i data-lucide="radio" style="color: var(--accent-color);"></i>
+            <span id="pay-status-text">Awaiting payment...</span>
+          </div>
+        </div>
+
+        <!-- Success Screen -->
+        <div id="customer-success-card" class="glass-card success-screen" style="display: none;">
+          <div class="success-icon">
+            <i data-lucide="check"></i>
+          </div>
+          <h2>Payment Received!</h2>
+          <p>The transaction has been detected and is being recorded on the blockchain. Thank you!</p>
+          
+          <div style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.15); border-radius: 8px; padding: 1rem; width: 100%; text-align: left; font-family: monospace; font-size: 0.8rem; margin-bottom: 2rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.35rem;">
+              <span style="color: var(--text-secondary);">Address:</span>
+              <span id="success-addr" style="color: var(--text-primary);">bc1q...</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 0.35rem;">
+              <span style="color: var(--text-secondary);">Amount:</span>
+              <span id="success-amount" style="color: var(--text-primary);">0 sats</span>
+            </div>
+            <div style="display: flex; justify-content: space-between;">
+              <span style="color: var(--text-secondary);">Status:</span>
+              <span id="success-status" style="color: var(--success-color); font-weight: bold;">PAID</span>
+            </div>
+          </div>
+
+          <a href="#" id="success-mempool-link" target="_blank" class="btn btn-primary" style="width: 100%;">
+            <i data-lucide="external-link"></i> View Transaction
+          </a>
+        </div>
+
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Toast Notifications -->
+  <div id="toast-notification" class="toast">
+    <i id="toast-icon" data-lucide="info"></i>
+    <span id="toast-message">Message text</span>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-container">
+      <p>GitPay &copy; 2026. Powered by <a href="https://pages.github.com/" target="_blank">GitHub Pages</a>, <a href="https://github.com/features/actions" target="_blank">Actions</a>, and <a href="https://github.com/features/issues" target="_blank">Issues</a>.</p>
+      <p style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--text-muted);">This is a fully decentralized, non-custodial, client-side application. No servers are involved.</p>
+    </div>
+  </footer>
+
+  <!-- App logic -->
+  <script src="app.js"></script>
+</body>
+</html>
