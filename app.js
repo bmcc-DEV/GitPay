@@ -41,7 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-// ================= CRYPTOGRAPHY HELPERS (AES-GCM WebCrypto) =================
+// ================= CRYPTOGRAPHY HELPERS (AES-GCM WebCrypto with XOR fallback) =================
+
+const isWebCryptoSupported = typeof crypto !== 'undefined' && typeof crypto.subtle !== 'undefined';
 
 function generateRandomHex(length) {
   const arr = new Uint8Array(length);
@@ -57,12 +59,50 @@ async function sha256Hex(message) {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Fallback XOR encryption/decryption for non-secure contexts (HTTP, local files)
+function xorEncryptDecrypt(text, hexKey) {
+  let result = '';
+  const keyBytes = [];
+  for (let i = 0; i < hexKey.length; i += 2) {
+    keyBytes.push(parseInt(hexKey.substr(i, 2), 16) || 0);
+  }
+  if (keyBytes.length === 0) keyBytes.push(42);
+
+  for (let i = 0; i < text.length; i++) {
+    const charCode = text.charCodeAt(i);
+    const keyByte = keyBytes[i % keyBytes.length];
+    const xorValue = charCode ^ keyByte;
+    result += String.fromCharCode(xorValue);
+  }
+  return result;
+}
+
 // Derives a determinist key for an invoice based on merchant masterKey and invoice index
 async function deriveInvoiceKey(masterKeyHex, index) {
-  return await sha256Hex(`${masterKeyHex}-${index}`);
+  const message = `${masterKeyHex}-${index}`;
+  if (!isWebCryptoSupported) {
+    // Simple fast deterministic hash fallback for local HTTP/file testing
+    let hash = 0;
+    for (let i = 0; i < message.length; i++) {
+      hash = (hash << 5) - hash + message.charCodeAt(i);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(16).repeat(8).substring(0, 64).padEnd(64, 'f');
+  }
+  return await sha256Hex(message);
 }
 
 async function encryptAesGcm(text, hexKey) {
+  if (!isWebCryptoSupported) {
+    console.warn('WebCrypto not supported in this context. Using XOR obfuscation fallback.');
+    try {
+      const ciphertext = btoa(unescape(encodeURIComponent(xorEncryptDecrypt(text, hexKey))));
+      return { ciphertext: ciphertext, iv: 'xor-fallback' };
+    } catch (e) {
+      return { ciphertext: btoa(xorEncryptDecrypt(text, hexKey)), iv: 'xor-fallback' };
+    }
+  }
+
   const encoder = new TextEncoder();
   const cleanKey = hexKey.trim();
   const rawKey = new Uint8Array(cleanKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
@@ -89,6 +129,15 @@ async function encryptAesGcm(text, hexKey) {
 }
 
 async function decryptAesGcm(ciphertextBase64, ivBase64, hexKey) {
+  if (ivBase64 === 'xor-fallback' || !isWebCryptoSupported) {
+    try {
+      const decodedText = decodeURIComponent(escape(xorEncryptDecrypt(atob(ciphertextBase64), hexKey)));
+      return decodedText;
+    } catch (e) {
+      return xorEncryptDecrypt(atob(ciphertextBase64), hexKey);
+    }
+  }
+
   try {
     const decoder = new TextDecoder();
     const cleanKey = hexKey.trim();
@@ -222,7 +271,7 @@ function handleSaveSettings(event) {
   event.preventDefault();
 
   const token = document.getElementById('setting-gh-token').value.trim();
-  const repo = document.getElementById('setting-gh-repo').value.trim();
+  let repo = document.getElementById('setting-gh-repo').value.trim();
   const xkey = document.getElementById('setting-extended-key').value.trim();
   const net = document.getElementById('setting-network').value;
   const fiat = document.getElementById('setting-fiat-currency').value;
@@ -232,6 +281,14 @@ function handleSaveSettings(event) {
   const localDiscord = document.getElementById('setting-local-discord').value.trim();
   const localTgToken = document.getElementById('setting-local-tg-token').value.trim();
   const localTgChat = document.getElementById('setting-local-tg-chat').value.trim();
+
+  // Smart sanitization of GitHub URL if pasted
+  if (repo.includes('github.com/')) {
+    const parts = repo.split('github.com/')[1].split('/');
+    if (parts.length >= 2) {
+      repo = `${parts[0]}/${parts[1].replace('.git', '')}`;
+    }
+  }
 
   if (!repo.includes('/')) {
     showToast('Error: Repository path must be in "owner/repo" format.', 'danger');
@@ -912,6 +969,13 @@ function copyPaymentLink(url) {
 async function loadCustomerInvoice(issueNumber) {
   let ownerRepo = gitPaySettings.ghRepo;
   
+  if (ownerRepo && ownerRepo.includes('github.com/')) {
+    const parts = ownerRepo.split('github.com/')[1].split('/');
+    if (parts.length >= 2) {
+      ownerRepo = `${parts[0]}/${parts[1].replace('.git', '')}`;
+    }
+  }
+
   if (!ownerRepo) {
     // Auto-detect from GitHub Pages URL structure
     const hostname = window.location.hostname;
