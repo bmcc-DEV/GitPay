@@ -1,8 +1,8 @@
-# 🪙 GitPay (v4.0 — Nostr & Aetheris Edition)
+# 🪙 GitPay
 
 > A **zero-cost, non-custodial, and fully decentralized** Bitcoin payment processor running entirely in the browser and powered by a Nostr Relay Network. No servers, no database, no GitHub APIs, and no centralized intermediaries.
 
-GitPay v4.0 implements a sovereign, serverless payment gateway that uses **Nostr** as a P2P messaging ledger (NostraaB - Nostr as a Backend) and aligns with the cryptographic axioms of the **Aetheris Manifesto** for metadata-blind, untraceable transactions.
+GitPay  implements a sovereign, serverless payment gateway that uses **Nostr** as a P2P messaging ledger (NostraaB - Nostr as a Backend) and aligns with the cryptographic axioms of the **Aetheris Manifesto** for metadata-blind, untraceable transactions.
 
 ---
 
