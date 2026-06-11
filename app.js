@@ -7,11 +7,68 @@ let gitPaySettings = {
   fiatCurrency: 'USD',
   masterKey: '',
   tolerance: 99.5,
+  workerUrl: '',
   localWebhook: '',
   localDiscord: '',
   localTgToken: '',
   localTgChat: ''
 };
+
+let activeSyncInterval = null;
+
+function startActiveSync() {
+  if (activeSyncInterval) clearInterval(activeSyncInterval);
+  // Initial check
+  syncInvoicesList();
+  // Poll every 8 seconds
+  activeSyncInterval = setInterval(() => {
+    if (!document.hidden && validateSettings(gitPaySettings)) {
+      console.log('[ActiveSync] Automatically checking pending invoices...');
+      triggerLocalBlockchainCheck(cachedIssues);
+    }
+  }, 8000);
+}
+
+function stopActiveSync() {
+  if (activeSyncInterval) {
+    clearInterval(activeSyncInterval);
+    activeSyncInterval = null;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  const isMerchantView = document.getElementById('view-dashboard') && 
+                         (document.getElementById('view-dashboard').classList.contains('active') ||
+                          document.getElementById('view-create').classList.contains('active') ||
+                          document.getElementById('view-settings').classList.contains('active'));
+  if (document.hidden) {
+    console.log('[ActiveSync] Tab backgrounded, pausing sync');
+    stopActiveSync();
+  } else if (isMerchantView) {
+    console.log('[ActiveSync] Tab focused, resuming sync');
+    startActiveSync();
+  }
+});
+
+function syncSettingsToIndexedDB(settings) {
+  const request = indexedDB.open('gitpay_db', 1);
+  request.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (!db.objectStoreNames.contains('keyvalue')) {
+      db.createObjectStore('keyvalue');
+    }
+  };
+  request.onsuccess = (e) => {
+    const db = e.target.result;
+    try {
+      const transaction = db.transaction('keyvalue', 'readwrite');
+      const store = transaction.objectStore('keyvalue');
+      store.put(JSON.stringify(settings), 'gitpay_settings');
+    } catch (err) {
+      console.warn('Failed to sync settings to IndexedDB:', err);
+    }
+  };
+}
 
 let btcPrice = 0.0;
 let qrCodeInstance = null;
@@ -26,6 +83,16 @@ document.addEventListener('DOMContentLoaded', () => {
   
   // Load settings from localStorage
   loadSettings();
+
+  // Register Service Worker for PWA
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js')
+      .then(reg => {
+        console.log('[PWA] Service Worker registered successfully:', reg.scope);
+        syncSettingsToIndexedDB(gitPaySettings);
+      })
+      .catch(err => console.warn('[PWA] Service Worker registration failed:', err));
+  }
 
   // Check URL parameters for customer invoice view
   const urlParams = new URLSearchParams(window.location.search);
@@ -180,7 +247,7 @@ function setupMerchantView() {
     switchTab('settings');
   } else {
     document.getElementById('setup-warning-card').style.display = 'none';
-    syncInvoicesList();
+    startActiveSync();
   }
 
   // Load BTC exchange rates
@@ -223,7 +290,7 @@ function switchTab(tabName) {
 
   // Specific triggers
   if (tabName === 'dashboard') {
-    syncInvoicesList();
+    startActiveSync();
   } else if (tabName === 'create') {
     fetchBtcPrice();
     calculateNextDerivationIndex();
@@ -271,6 +338,7 @@ function loadSettings() {
   document.getElementById('setting-fiat-currency').value = gitPaySettings.fiatCurrency || 'USD';
   document.getElementById('setting-master-key').value = gitPaySettings.masterKey || '';
   document.getElementById('setting-tolerance').value = gitPaySettings.tolerance || 99.5;
+  document.getElementById('setting-worker-url').value = gitPaySettings.workerUrl || '';
   document.getElementById('setting-local-webhook').value = gitPaySettings.localWebhook || '';
   document.getElementById('setting-local-discord').value = gitPaySettings.localDiscord || '';
   document.getElementById('setting-local-tg-token').value = gitPaySettings.localTgToken || '';
@@ -289,6 +357,7 @@ function handleSaveSettings(event) {
   const fiat = document.getElementById('setting-fiat-currency').value;
   const masterKey = document.getElementById('setting-master-key').value.trim();
   const tolerance = parseFloat(document.getElementById('setting-tolerance').value);
+  const workerUrl = document.getElementById('setting-worker-url').value.trim();
   const localWebhook = document.getElementById('setting-local-webhook').value.trim();
   const localDiscord = document.getElementById('setting-local-discord').value.trim();
   const localTgToken = document.getElementById('setting-local-tg-token').value.trim();
@@ -334,6 +403,7 @@ function handleSaveSettings(event) {
     fiatCurrency: fiat,
     masterKey: masterKey,
     tolerance: tolerance,
+    workerUrl: workerUrl,
     localWebhook: localWebhook,
     localDiscord: localDiscord,
     localTgToken: localTgToken,
@@ -341,6 +411,7 @@ function handleSaveSettings(event) {
   };
 
   localStorage.setItem('gitpay_settings', JSON.stringify(gitPaySettings));
+  syncSettingsToIndexedDB(gitPaySettings);
   updateFiatSymbol(fiat);
 
   document.getElementById('setup-warning-card').style.display = 'none';
@@ -561,8 +632,13 @@ async function renderInvoicesTable(issues) {
         <td class="nowrap" style="font-size: 0.8rem; color: var(--text-secondary);">${createdAt}</td>
         <td class="text-center nowrap">
           <button class="btn" style="padding: 0.35rem 0.65rem; font-size: 0.8rem;" onclick="copyPaymentLink('${customerUrl}')" title="Copy Customer Payment Link">
-            <i data-lucide="link" style="width: 14px; height: 14px;"></i> Copy Link
+            <i data-lucide="link" style="width: 14px; height: 14px;"></i> Link
           </button>
+          ${labels.includes('pending') && issue.state === 'open' ? `
+          <button class="btn btn-secondary" style="padding: 0.35rem 0.65rem; font-size: 0.8rem; margin-left: 0.25rem;" onclick="verifyInvoiceManually(${issue.number})" id="btn-verify-${issue.number}" title="Manually verify this payment">
+            <i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify
+          </button>
+          ` : ''}
         </td>
       </tr>
     `;
@@ -902,7 +978,7 @@ async function handleCreateInvoice(event) {
 ### ⚙️ Raw Invoice Data
 Please do not edit the block below. The poller script reads this JSON payload to verify payments.
 
-\`\`\`json
+```json
 {
   "amount_sats": ${amountSats},
   "address": "${address}",
@@ -912,9 +988,10 @@ Please do not edit the block below. The poller script reads this JSON payload to
   "address_type": "${addressType}",
   "encrypted_desc": "${encryption.ciphertext}",
   "iv": "${encryption.iv}",
-  "tolerance": ${gitPaySettings.tolerance || 99.5}
+  "tolerance": ${gitPaySettings.tolerance || 99.5},
+  "worker_url": "${gitPaySettings.workerUrl || ''}"
 }
-\`\`\`
+```
 `;
 
     // 3. Post to GitHub API
@@ -942,6 +1019,23 @@ Please do not edit the block below. The poller script reads this JSON payload to
     const issue = await response.json();
     const checkoutUrl = `${window.location.origin}${window.location.pathname}?invoice=${issue.number}`;
     const customerUrl = `${checkoutUrl}#key=${invoiceKey}`;
+
+    // Notify Cloudflare Worker of the new invoice registration
+    if (gitPaySettings.workerUrl) {
+      console.log('[Worker] Registering invoice with Cloudflare Worker...');
+      fetch(`${gitPaySettings.workerUrl}/invoice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          issue_number: issue.number,
+          address: address,
+          amount_sats: amountSats,
+          description: description,
+          network: gitPaySettings.network,
+          created_at: createdAt
+        })
+      }).catch(err => console.warn('Failed to register invoice with worker:', err));
+    }
 
     // Success!
     showToast(`Invoice #${issue.number} generated successfully!`, 'success');
@@ -1129,16 +1223,16 @@ function renderCustomerInvoice(invoice, issue, merchantName) {
 
   // Set up real-time blockchain monitoring
   const isTestnet = invoice.network === 'testnet';
-  pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice);
+  pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice, issue.number);
   
   customerPollInterval = setInterval(() => {
-    pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice);
+    pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice, issue.number);
   }, 8000);
 
   lucide.createIcons();
 }
 
-async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice) {
+async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice, issueNumber) {
   const mempoolUrl = isTestnet 
     ? `https://mempool.space/testnet/api/address/${address}`
     : `https://mempool.space/api/address/${address}`;
@@ -1162,6 +1256,16 @@ async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice)
       // Payment successful (either exact or within tolerance)
       clearInterval(customerPollInterval);
       clearInterval(customerTimerInterval);
+
+      // Ping worker if URL is configured in the invoice payload
+      if (invoice.worker_url) {
+        console.log('[Customer View] Pinging Cloudflare Worker for instant update...');
+        fetch(`${invoice.worker_url}/check`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ issue_number: issueNumber })
+        }).catch(err => console.warn('Failed to ping worker:', err));
+      }
 
       showCustomerSuccessScreen({
         ...invoice,
@@ -1282,4 +1386,149 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
+}
+
+async function verifyInvoiceManually(issueNumber) {
+  const btn = document.getElementById(`btn-verify-${issueNumber}`);
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<i data-lucide="loader-2" style="animation: spin 1s infinite linear; width: 12px; height: 12px;"></i> checking...`;
+    lucide.createIcons();
+  }
+
+  const issue = cachedIssues.find(i => i.number === issueNumber);
+  if (!issue) {
+    showToast('Failed to find invoice details in cache.', 'danger');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
+      lucide.createIcons();
+    }
+    return;
+  }
+
+  let invoiceData = {};
+  try {
+    const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
+    if (jsonMatch) {
+      invoiceData = JSON.parse(jsonMatch[1].trim());
+    }
+  } catch (e) {
+    showToast('Failed to parse invoice details.', 'danger');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
+      lucide.createIcons();
+    }
+    return;
+  }
+
+  if (!invoiceData.address || !invoiceData.amount_sats) {
+    showToast('Invoice details are incomplete.', 'danger');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
+      lucide.createIcons();
+    }
+    return;
+  }
+
+  const isTestnet = invoiceData.network === 'testnet';
+  const mempoolUrl = isTestnet 
+    ? `https://mempool.space/testnet/api/address/${invoiceData.address}`
+    : `https://mempool.space/api/address/${invoiceData.address}`;
+
+  try {
+    const response = await fetch(mempoolUrl);
+    if (!response.ok) throw new Error(`Mempool API returned status ${response.status}`);
+
+    const data = await response.json();
+    const confirmed = data.chain_stats.funded_txo_sum || 0;
+    const unconfirmed = data.mempool_stats.funded_txo_sum || 0;
+    const totalReceived = confirmed + unconfirmed;
+
+    const targetSats = invoiceData.amount_sats;
+    const tolerance = gitPaySettings.tolerance || 99.5;
+    const thresholdSats = targetSats * (tolerance / 100);
+
+    if (totalReceived >= thresholdSats) {
+      showToast(`Payment of ${totalReceived} sats detected! Updating ledger...`, 'success');
+      await confirmPaymentOnGitHub(issueNumber, invoiceData, totalReceived, confirmed >= thresholdSats);
+      
+      // Ping worker if URL is configured
+      if (gitPaySettings.workerUrl) {
+        fetch(`${gitPaySettings.workerUrl}/check`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ issue_number: issueNumber })
+        }).catch(err => console.warn('Worker sync error:', err));
+      }
+    } else {
+      // Expiry check
+      const timeElapsed = Date.now() - invoiceData.created_at;
+      const expiryLimit = 15 * 60 * 1000;
+      
+      if (timeElapsed > expiryLimit) {
+        showToast('Invoice expired. Closing ledger...', 'info');
+        await markExpiredOnGitHub(issueNumber, invoiceData);
+        
+        if (gitPaySettings.workerUrl) {
+          fetch(`${gitPaySettings.workerUrl}/check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ issue_number: issueNumber })
+          }).catch(err => console.warn('Worker sync error:', err));
+        }
+      } else {
+        const minutesLeft = Math.round((expiryLimit - timeElapsed) / 60000);
+        showToast(`Still pending: ${totalReceived.toLocaleString()} / ${targetSats.toLocaleString()} sats received. ~${minutesLeft}m left.`, 'info');
+      }
+    }
+  } catch (err) {
+    showToast(`Verification failed: ${err.message}`, 'danger');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
+      lucide.createIcons();
+    }
+  }
+}
+
+async function markExpiredOnGitHub(issueNumber, invoice) {
+  const [owner, repo] = gitPaySettings.ghRepo.split('/');
+  const token = gitPaySettings.ghToken;
+  try {
+    await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify({
+        body: `⏰ **Invoice Expired (Manual Refresh Check)**\n\nNo payment was detected within the 15-minute window. This invoice is now closed.`
+      })
+    });
+
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github.v3+json'
+      },
+      body: JSON.stringify({
+        labels: ['expired', 'invoice'],
+        state: 'closed'
+      })
+    });
+
+    if (response.ok) {
+      showToast(`Invoice #${issueNumber} marked as Expired & closed!`, 'info');
+      syncInvoicesList();
+    }
+  } catch (err) {
+    console.error('Failed to mark expired on GitHub:', err);
+  }
 }

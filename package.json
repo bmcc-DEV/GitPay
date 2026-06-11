@@ -1,8 +1,8 @@
 {
   "name": "gitpay",
   "version": "1.0.0",
-  "description": "Zero-cost, non-custodial Bitcoin payment processor built on GitHub Pages, Issues, and Actions.",
-  "main": ".github/scripts/poller.js",
+  "description": "Zero-cost, non-custodial Bitcoin payment processor built on GitHub Pages, Issues, and serverless Cloudflare Workers.",
+  "main": "app.js",
   "scripts": {
     "build:lib": "browserify lib-entry.js --standalone GitPayLib -o js/bitcoin.js",
     "minify:lib": "uglifyjs js/bitcoin.js -c -m -o js/bitcoin.min.js"

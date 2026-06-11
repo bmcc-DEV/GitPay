@@ -1,0 +1,13 @@
+name = "gitpay-worker"
+main = "index.js"
+compatibility_date = "2026-06-11"
+
+# Bind your KV Namespace in the Cloudflare Dashboard or via Wrangler
+# Replace the id below with your actual KV namespace ID
+kv_bindings = [
+  { binding = "GITPAY_KV", id = "PLACEHOLDER_KV_NAMESPACE_ID" }
+]
+
+# Configure Cron triggers (runs checks every 5 minutes for pending invoices)
+[triggers]
+crons = ["*/5 * * * *"]

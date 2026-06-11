@@ -4,7 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GitPay - Sovereign Bitcoin Payment Gateway</title>
-  <meta name="description" content="GitPay is a zero-cost, non-custodial Bitcoin invoice processor running entirely on GitHub Pages, Issues, and Actions.">
+  <meta name="description" content="GitPay is a zero-cost, non-custodial Bitcoin invoice processor running entirely on GitHub Pages, Issues, and serverless Cloudflare Workers.">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <meta name="theme-color" content="#F7931A">
   
   <!-- Favicon using a Bitcoin emoji Data URI -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪙</text></svg>">
@@ -260,6 +263,16 @@
             </div>
             <span class="form-helper">The percentage of the invoice value that must be received to mark it as fully paid (e.g. 99.5% tolerates small wallet fee deductions).</span>
           </div>
+          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Cloudflare Worker (24/7 Sync)</h3>
+          <div class="form-group">
+            <label class="form-label" for="setting-worker-url">Cloudflare Worker URL</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="server"></i>
+              <input type="url" id="setting-worker-url" class="form-input" placeholder="https://gitpay-worker.username.workers.dev">
+            </div>
+            <span class="form-helper">Optional serverless Worker URL to monitor payments 24/7 and send notifications when the dashboard is closed.</span>
+          </div>
+
           <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Notifications (Local Fallback)</h3>
           <span class="form-helper" style="margin-bottom: 1rem; display: block; color: var(--text-secondary);">Configure alerts triggered directly from your browser when the Dashboard confirms a payment locally (bypasses GitHub Actions).</span>
 

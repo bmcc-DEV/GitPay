@@ -1,0 +1,17 @@
+{
+  "name": "GitPay",
+  "short_name": "GitPay",
+  "description": "Zero-cost, non-custodial Bitcoin invoice processor",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b0e17",
+  "theme_color": "#F7931A",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
