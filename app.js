@@ -251,6 +251,18 @@ function loadSettings() {
     gitPaySettings.tolerance = 99.5;
   }
 
+  // Auto-detect repository if not set and running on GitHub Pages
+  if (!gitPaySettings.ghRepo) {
+    const hostname = window.location.hostname;
+    if (hostname.endsWith('.github.io')) {
+      const owner = hostname.split('.')[0];
+      const pathParts = window.location.pathname.split('/').filter(p => p !== '');
+      const repo = pathParts[0] || 'gitpay';
+      gitPaySettings.ghRepo = `${owner}/${repo}`;
+      console.log(`Auto-detected repository for settings: ${gitPaySettings.ghRepo}`);
+    }
+  }
+
   // Populate form fields
   document.getElementById('setting-gh-token').value = gitPaySettings.ghToken || '';
   document.getElementById('setting-gh-repo').value = gitPaySettings.ghRepo || '';
