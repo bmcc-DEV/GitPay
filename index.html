@@ -256,6 +256,40 @@
               <input type="number" step="0.1" min="90" max="100" id="setting-tolerance" class="form-input" placeholder="99.5" required>
             </div>
             <span class="form-helper">The percentage of the invoice value that must be received to mark it as fully paid (e.g. 99.5% tolerates small wallet fee deductions).</span>
+          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Notifications (Local Fallback)</h3>
+          <span class="form-helper" style="margin-bottom: 1rem; display: block; color: var(--text-secondary);">Configure alerts triggered directly from your browser when the Dashboard confirms a payment locally (bypasses GitHub Actions).</span>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-local-webhook">Local Webhook URL</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="link-2"></i>
+              <input type="url" id="setting-local-webhook" class="form-input" placeholder="https://yourserver.com/webhook">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-local-discord">Local Discord Webhook URL</label>
+            <div class="input-wrapper">
+              <i class="input-icon" data-lucide="message-square"></i>
+              <input type="url" id="setting-local-discord" class="form-input" placeholder="https://discord.com/api/webhooks/...">
+            </div>
+          </div>
+
+          <div class="form-group" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+            <div>
+              <label class="form-label" for="setting-local-tg-token">Local Telegram Bot Token</label>
+              <div class="input-wrapper">
+                <i class="input-icon" data-lucide="send"></i>
+                <input type="password" id="setting-local-tg-token" class="form-input" placeholder="bot_token">
+              </div>
+            </div>
+            <div>
+              <label class="form-label" for="setting-local-tg-chat">Local Telegram Chat ID</label>
+              <div class="input-wrapper">
+                <i class="input-icon" data-lucide="user"></i>
+                <input type="text" id="setting-local-tg-chat" class="form-input" placeholder="chat_id">
+              </div>
+            </div>
           </div>
 
           <button type="submit" id="btn-save-settings" class="btn btn-success" style="width: 100%;">

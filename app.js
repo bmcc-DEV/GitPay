@@ -6,7 +6,11 @@ let gitPaySettings = {
   network: 'mainnet',
   fiatCurrency: 'USD',
   masterKey: '',
-  tolerance: 99.5
+  tolerance: 99.5,
+  localWebhook: '',
+  localDiscord: '',
+  localTgToken: '',
+  localTgChat: ''
 };
 
 let btcPrice = 0.0;
@@ -206,6 +210,10 @@ function loadSettings() {
   document.getElementById('setting-fiat-currency').value = gitPaySettings.fiatCurrency || 'USD';
   document.getElementById('setting-master-key').value = gitPaySettings.masterKey || '';
   document.getElementById('setting-tolerance').value = gitPaySettings.tolerance || 99.5;
+  document.getElementById('setting-local-webhook').value = gitPaySettings.localWebhook || '';
+  document.getElementById('setting-local-discord').value = gitPaySettings.localDiscord || '';
+  document.getElementById('setting-local-tg-token').value = gitPaySettings.localTgToken || '';
+  document.getElementById('setting-local-tg-chat').value = gitPaySettings.localTgChat || '';
 
   updateFiatSymbol(gitPaySettings.fiatCurrency);
 }
@@ -220,6 +228,10 @@ function handleSaveSettings(event) {
   const fiat = document.getElementById('setting-fiat-currency').value;
   const masterKey = document.getElementById('setting-master-key').value.trim();
   const tolerance = parseFloat(document.getElementById('setting-tolerance').value);
+  const localWebhook = document.getElementById('setting-local-webhook').value.trim();
+  const localDiscord = document.getElementById('setting-local-discord').value.trim();
+  const localTgToken = document.getElementById('setting-local-tg-token').value.trim();
+  const localTgChat = document.getElementById('setting-local-tg-chat').value.trim();
 
   if (!repo.includes('/')) {
     showToast('Error: Repository path must be in "owner/repo" format.', 'danger');
@@ -252,7 +264,11 @@ function handleSaveSettings(event) {
     network: net,
     fiatCurrency: fiat,
     masterKey: masterKey,
-    tolerance: tolerance
+    tolerance: tolerance,
+    localWebhook: localWebhook,
+    localDiscord: localDiscord,
+    localTgToken: localTgToken,
+    localTgChat: localTgChat
   };
 
   localStorage.setItem('gitpay_settings', JSON.stringify(gitPaySettings));
@@ -616,9 +632,110 @@ async function confirmPaymentOnGitHub(issueNumber, invoice, receivedSats, isFull
         paidEl.innerText = parseInt(paidEl.innerText) + 1;
         pendingEl.innerText = Math.max(0, parseInt(pendingEl.innerText) - 1);
       }
+
+      // Dispatch local notifications directly from the browser!
+      await sendLocalNotifications('invoice.paid', issueNumber, invoice, receivedSats);
     }
   } catch (error) {
     console.error(`Error updating GitHub ledger for paid invoice #${issueNumber}:`, error);
+  }
+}
+
+async function sendLocalNotifications(event, issueNumber, invoice, receivedSats = 0) {
+  const [owner, repo] = gitPaySettings.ghRepo.split('/');
+  const isTestnet = invoice.network === 'testnet';
+  const explorerUrl = isTestnet 
+    ? `https://mempool.space/testnet/address/${invoice.address}`
+    : `https://mempool.space/address/${invoice.address}`;
+  
+  const issueUrl = `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
+  const statusText = event === 'invoice.paid' ? 'PAID ✅' : 'EXPIRED ⏰';
+  const color = event === 'invoice.paid' ? 1095553 : 15680572; // Hex: 0x10b981 (green) vs 0xef4444 (red)
+
+  // Decrypt description if encrypted
+  let description = invoice.description || 'Bitcoin Payment';
+  if (invoice.encrypted_desc && invoice.iv && gitPaySettings.masterKey) {
+    try {
+      const key = await deriveInvoiceKey(gitPaySettings.masterKey, invoice.index);
+      description = await decryptAesGcm(invoice.encrypted_desc, invoice.iv, key);
+    } catch(e) {}
+  }
+
+  // 1. Generic HTTP POST Webhook
+  const webhookUrl = gitPaySettings.localWebhook;
+  if (webhookUrl) {
+    console.log(`Triggering local generic webhook...`);
+    try {
+      await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event,
+          repository: `${owner}/${repo}`,
+          issue_number: issueNumber,
+          invoice: {
+            ...invoice,
+            description,
+            received_sats: receivedSats,
+            completed_at: Date.now()
+          }
+        })
+      });
+    } catch (e) { console.error('Local webhook failed:', e.message); }
+  }
+
+  // 2. Discord Webhook Notification
+  const discordUrl = gitPaySettings.localDiscord;
+  if (discordUrl) {
+    console.log(`Sending local Discord notification...`);
+    try {
+      const embed = {
+        title: `GitPay Invoice Alert (Local Trigger) - ${statusText}`,
+        color: color,
+        fields: [
+          { name: 'Invoice', value: `[#${issueNumber}](${issueUrl})`, inline: true },
+          { name: 'Description', value: description, inline: true },
+          { name: 'Network', value: `${invoice.network}`, inline: true },
+          { name: 'Amount Requested', value: `${invoice.amount_sats.toLocaleString()} sats`, inline: true },
+          { name: 'Amount Received', value: `${receivedSats.toLocaleString()} sats`, inline: true },
+          { name: 'Address', value: `[\`${invoice.address}\`](${explorerUrl})` }
+        ],
+        timestamp: new Date().toISOString()
+      };
+
+      await fetch(discordUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ embeds: [embed] })
+      });
+    } catch (e) { console.error('Local Discord webhook failed:', e.message); }
+  }
+
+  // 3. Telegram Bot Notification
+  const tgToken = gitPaySettings.localTgToken;
+  const tgChatId = gitPaySettings.localTgChat;
+  if (tgToken && tgChatId) {
+    console.log(`Sending local Telegram notification...`);
+    try {
+      const message = `🪙 *GitPay Invoice Alert (Local Trigger) - ${statusText}*\n\n` +
+                      `• *Invoice:* [#${issueNumber}](${issueUrl})\n` +
+                      `• *Description:* ${description}\n` +
+                      `• *Index:* \`${invoice.index}\` (${invoice.network})\n` +
+                      `• *Requested:* \`${invoice.amount_sats.toLocaleString()} sats\`\n` +
+                      `• *Received:* \`${receivedSats.toLocaleString()} sats\`\n` +
+                      `• *Address:* [${invoice.address}](${explorerUrl})`;
+
+      await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: tgChatId,
+          text: message,
+          parse_mode: 'Markdown',
+          disable_web_page_preview: true
+        })
+      });
+    } catch (e) { console.error('Local Telegram failed:', e.message); }
   }
 }
 
