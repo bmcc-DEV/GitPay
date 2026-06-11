@@ -6,6 +6,9 @@
   <title>GitPay - Sovereign Bitcoin Payment Gateway</title>
   <meta name="description" content="GitPay is a zero-cost, non-custodial Bitcoin invoice processor running entirely on GitHub Pages, Issues, and Actions.">
   
+  <!-- Favicon using a Bitcoin emoji Data URI -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🪙</text></svg>">
+  
   <!-- CSS -->
   <link rel="stylesheet" href="style.css">
   
@@ -198,7 +201,7 @@
           <div class="form-group">
             <label class="form-label" for="setting-gh-repo">Repository Path</label>
             <div class="input-wrapper">
-              <i class="input-icon" data-lucide="github"></i>
+              <i class="input-icon" data-lucide="git-branch"></i>
               <input type="text" id="setting-gh-repo" class="form-input" placeholder="yourusername/yourrepo" required>
             </div>
             <span class="form-helper">The owner/repo combination where invoice Issues will be published. (e.g. <code>satoshi/gitpay</code>)</span>
