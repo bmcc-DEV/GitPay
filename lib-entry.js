@@ -35,18 +35,24 @@ function deriveAddressFromExtendedKey({ extendedKey, index, type, networkType })
     throw new Error('Tamanho de chave estendida inválido (deve ter 78 bytes decodificados).');
   }
 
-  const versionHex = decoded.slice(0, 4).toString('hex');
+  // Convert first 4 bytes to hex string in a browser-safe way (supports both Buffer and Uint8Array)
+  const versionBytes = decoded.slice(0, 4);
+  const versionHex = Array.from(versionBytes).map(b => b.toString(16).padStart(2, '0')).join('');
 
-  // Prefix definitions
+  // Prefix definitions (including SLIP-0132 multisig capitals Zpub/Ypub/Vpub/Upub)
   const mainnetPrefixes = {
     '0488b21e': 'xpub',
     '049d7cb2': 'ypub',
-    '04b24746': 'zpub'
+    '04b24746': 'zpub',
+    '02aa7ed3': 'Zpub',
+    '0295b43f': 'Ypub'
   };
   const testnetPrefixes = {
     '043587cf': 'tpub',
     '044a14e2': 'upub',
-    '045f1cf6': 'vpub'
+    '045f1cf6': 'vpub',
+    '025754f0': 'Vpub',
+    '024289ef': 'Upub'
   };
 
   const isTestnetKey = versionHex in testnetPrefixes;
@@ -71,10 +77,14 @@ function deriveAddressFromExtendedKey({ extendedKey, index, type, networkType })
   let standardKey = extendedKey;
   if (keyType !== 'xpub' && keyType !== 'tpub') {
     const targetVersionBytes = isTestnetKey 
-      ? Buffer.from('043587cf', 'hex') // tpub
-      : Buffer.from('0488b21e', 'hex'); // xpub
+      ? new Uint8Array([0x04, 0x35, 0x87, 0xcf]) // tpub
+      : new Uint8Array([0x04, 0x88, 0xb2, 0x1e]); // xpub
     
-    const convertedDecoded = Buffer.concat([targetVersionBytes, decoded.slice(4)]);
+    // Concat using standard Uint8Array to bypass browserify Buffer issues
+    const convertedDecoded = new Uint8Array(78);
+    convertedDecoded.set(targetVersionBytes, 0);
+    convertedDecoded.set(new Uint8Array(decoded.slice(4)), 4);
+    
     standardKey = bs58check.encode(convertedDecoded);
   }
 
@@ -87,9 +97,9 @@ function deriveAddressFromExtendedKey({ extendedKey, index, type, networkType })
   // 4. Decide address type
   let addressType = type;
   if (!addressType) {
-    if (keyType === 'zpub' || keyType === 'vpub') {
+    if (keyType === 'zpub' || keyType === 'vpub' || keyType === 'Zpub' || keyType === 'Vpub') {
       addressType = 'p2wpkh'; // Native SegWit
-    } else if (keyType === 'ypub' || keyType === 'upub') {
+    } else if (keyType === 'ypub' || keyType === 'upub' || keyType === 'Ypub' || keyType === 'Upub') {
       addressType = 'p2sh-p2wpkh'; // Nested SegWit
     } else {
       addressType = 'p2pkh'; // Legacy
