@@ -1,129 +1,91 @@
-# 🪙 GitPay (v3.0 — Zero Actions)
+# 🪙 GitPay (v4.0 — Nostr & Aetheris Edition)
 
-> A **zero-cost, non-custodial, and fully private** Bitcoin payment processor powered entirely by GitHub Pages, Issues, and serverless Cloudflare Workers. No servers, no database, no GitHub Actions minutes limit.
+> A **zero-cost, non-custodial, and fully decentralized** Bitcoin payment processor running entirely in the browser and powered by a Nostr Relay Network. No servers, no database, no GitHub APIs, and no centralized intermediaries.
 
-GitPay is a highly competent, production-ready implementation of *"GitHub as a Backend"* (GitaaB). It allows developers and sovereign merchants to process on-chain Bitcoin payments and manage a secure ledger without databases, hosting costs, or intermediate custodians. Version 3.0 eliminates all dependencies on GitHub Actions, operating fully client-side and using an optional serverless Cloudflare Worker for 24/7 payment tracking.
+GitPay v4.0 implements a sovereign, serverless payment gateway that uses **Nostr** as a P2P messaging ledger (NostraaB - Nostr as a Backend) and aligns with the cryptographic axioms of the **Aetheris Manifesto** for metadata-blind, untraceable transactions.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Architecture (Nostr + Aetheris Layer III)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  GITHUB PAGES (Frontend client-side)                        │
-│  ───────────────────────────────────                        │
-│  • Merchant Dashboard: Configures settings & manages keys   │
-│  • AES-GCM Engine: Encrypts/decrypts descriptions locally   │
-│  • BIP32 Engine: Derives segwit/legacy addresses from xpub  │
-│  • Active Sync: Checks blockchain & updates GitHub ledger   │
-│  • Customer View: Shows QR Code, address, and live timer     │
-└───────────┬───────────────────────────────────────┬─────────┘
-            │                                       │
-            │ (Pings paid status)                   │ POST (with PAT)
-            ▼                                       ▼
-┌───────────────────────────┐             ┌───────────────────┐
-│  CLOUDFLARE WORKER        │             │  GITHUB ISSUES    │
-│  ───────────────────      │             │  ─────────────    │
-│  • Optional 24/7 sync     │             │  • Invoice Ledger │
-│  • POST /invoice registry │             │  • Labels: paid,  │
-│  • POST /check (checkout) │             │    pending,       │
-│  • Cron (every 5 min)     │             │    expired        │
-└─────┬──────────────┬──────┘             └───────────────────┘
-      │              │
-      ▼              ▼
-┌───────────┐  ┌────────────┐
-│ Discord   │  │ Telegram   │
-│ Notifications│ Bot Alerts │
-└───────────┘  └────────────┘
+│  GITHUB PAGES (Frontend client-side Dashboard / Checkout)   │
+│  ────────────────────────────────────────────────────────   │
+│  • BIP32 Address Derivation client-side                     │
+│  • AES-GCM-256 Client Encryption (Aetheris Layer III)       │
+│  • Active Sync: Real-time relay synchronization             │
+└──────────────┬───────────────────────────────▲──────────────┘
+               │                               │
+               │ 1. Publish Event (Kind 30023) │ 4. Read Invoices & Receipts
+               ▼                               │
+┌──────────────────────────────────────────────┴──────────────┐
+│  DECENTRALIZED NOSTR RELAYS (Blind Intermediaries)          │
+│  ──────────────────────────────────────────────────         │
+│  • Invoices (Kind 30023 replaceable, indexed by Address Hash)│
+│  • Payment Receipts (Kind 23001 P2P instant checkouts)      │
+│  • Relays see only encrypted payload blobs and address hashes│
+└──────────────────────────────────────────────┬──────────────┘
+                                               │
+                                               │ 2. Check derived address
+                                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│  BITCOIN BLOCKCHAIN (mempool.space / Electrum WS)           │
+│  ────────────────────────────────────────────────           │
+│  • Checked client-side to verify transactions                │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🛡️ Sovereign Security & Privacy Design
+## 🛡️ Sovereign Security & Privacy Axioms
 
-1. **Non-Custodial**: Your keys, your coins. The frontend only requires your Extended Public Key (e.g. `xpub`/`ypub`/`zpub`). Private keys are never touched, imported, or exposed.
-2. **Local Settings**: Configuration settings (like your GitHub PAT, repository path, and extended public key) are saved **exclusively in your browser's local storage** (`localStorage`) and synced securely to browser IndexedDB for PWA service worker background tasks.
-3. **Zero Metadata Leaks (AES-GCM Encryption)**: 
-   - When generating an invoice, the description is encrypted client-side using a key derived deterministically from the invoice index and the **Merchant Master Encryption Key**.
-   - The ciphertext is saved in the GitHub Issue body. The GitHub platform and external observers **never see what was purchased or who the customer is**.
-   - The decryption key is passed to the customer via the URL fragment/hash (`#key=...`), which is **never sent to any server** (remains in the browser).
-   - The merchant can decrypt all descriptions on their Dashboard automatically using the local Master Key.
-4. **Anonymous Client View**: The customer checkout page (`/?invoice=XX#key=...`) queries the public GitHub API and blockchain explorer anonymously without requiring any API tokens.
-
----
-
-## ⚡ Key Features (v3.0)
-
-*   **Zero Actions Dependency**: No more GitHub Actions delay, cron limitations, or repo permission warnings. 
-*   **Active Sync**: The **Merchant Dashboard actively polls the blockchain** for pending invoices in the background using the Page Visibility API while open. If a payment is detected, the dashboard updates the GitHub Issue state *instantly* using the merchant's API token.
-*   **Manual Verification**: Instantly check any invoice state directly from the dashboard with the **Verify** button.
-*   **Instant Checkout settlement**: When the customer's page detects payment, it pings the Cloudflare Worker (`POST /check`) to instantly close the GitHub Issue, eliminating Cron triggers waiting periods.
-*   **PWA Support**: Install the GitPay Dashboard directly to your mobile or desktop device. Includes a Service Worker (`sw.js`) and Background Sync capability.
-*   **Payment Tolerance & Underpayment Handling**:
-    *   **Tolerance**: Easily adjust payment tolerance (e.g., `99.5%` to tolerate minor exchange or wallet fee deductions).
-    *   **Underpayment UI**: If a client sends a partial payment (e.g., 50% of the invoice), the checkout screen flags a warning and instructs the customer to send the remaining amount to the same address.
+1. **Non-Custodial**: Your keys, your coins. The gateway derives addresses from your master Extended Public Key (`xpub`/`ypub`/`zpub`). Private keys are never imported, exposed, or transmitted.
+2. **Local Identity**: Your store private key (`nsec`) remains stored **exclusively in your browser's local storage and IndexedDB** (for PWA service worker background checks).
+3. **Probabilistic Fee Routing (1% Fee)**: 
+   - Out of 100 generated invoices, exactly 1 invoice (selected with a **1% probability**) will derive its receiving address from the developer's public xpub (`DEVELOPER_XPUB`) rather than the merchant's.
+   - This eliminates dust split transaction outputs, halves network transaction fees, and eliminates all central collection servers or escrow contracts, keeping the code fully serverless.
+4. **Aetheris Layer III: Blind Metadata Communications**:
+   - **Address Hashing (`d` tag)**: The invoice's primary index tag on Nostr relays is `sha256(derived_address)`. The raw Bitcoin payment address is never stored in plain text on the relays, preventing network metadata mapping.
+   - **Payload Encryption**: All invoice metadata (amounts, raw Bitcoin addresses, networks, and descriptions) is fully encrypted using AES-GCM-256 with the invoice key.
+   - **Zero-Knowledge Relays**: Intermediaries (relays) are mathematically blind to transaction details, status updates (pending/paid/expired), or buyer/seller identities.
+5. **Decentralized Receipting**: The customer's checkout browser acts as a temporary peer, publishing a signed payment receipt (Kind 23001) to Nostr relays when a transaction is seen, resulting in immediate ledger syncs.
 
 ---
 
-## 🚀 Step-by-Step Setup Guide
+## 🚀 Setup Guide
 
-### 1. Create a Repository
-1. Create a new public repository on GitHub (e.g., `yourusername/gitpay`).
-2. Clone this repository to your local system or upload the GitPay files.
+### 1. Build and Deploy
+1. Clone this repository.
+2. Build and bundle the Bitcoin/Nostr library:
+   ```bash
+   npm install
+   npm run build:lib
+   npm run minify:lib
+   ```
+3. Deploy the files to any static host (e.g., GitHub Pages, Vercel, Netlify, or self-host on a private server).
 
-### 2. Generate a GitHub Personal Access Token (PAT)
-To allow the Merchant Dashboard to write new invoices and update issue labels, you need a Token:
-1. Go to **GitHub Settings** ➔ **Developer Settings** ➔ **Personal Access Tokens** ➔ **Tokens (classic)**.
-2. Click **Generate new token (classic)**.
-3. Name it `GitPay Gateway` and select the **`public_repo`** scope.
-4. Copy the token. You will paste this into the GitPay settings page in your browser.
-
-### 3. Enable GitHub Pages
-1. In your repository on GitHub, go to **Settings** ➔ **Pages**.
-2. Under **Build and deployment**, set **Source** to **Deploy from a branch**.
-3. Select your main branch (e.g., `main`) and root folder (`/`), then click **Save**.
-4. GitHub will give you a public URL (e.g., `https://yourusername.github.io/gitpay/`).
-
-### 4. Deploy the 24/7 Cloudflare Worker (Optional)
-For 24/7 automated monitoring when your dashboard is closed:
-1. Navigate to the `worker/` directory: `cd worker`
-2. Follow the deployment guide inside the [Worker README](worker/README.md) to set up Cloudflare KV and publish the worker.
-3. Copy the deployed worker URL and save it in your Settings.
+### 2. Configure Settings
+1. Open the GitPay homepage in your browser.
+2. Go to **Settings** and configure:
+   - **Store Private Key (nsec)**: Click the generate button to generate a new store identity keypair. Save this key safely!
+   - **Extended Public Key**: Input your `xpub`/`ypub`/`zpub` (Mainnet) or `tpub`/`upub`/`vpub` (Testnet).
+   - **Nostr Relays**: Enter a list of public or private Nostr relays to connect to (defaults are provided).
+3. Click **Save Configuration**.
 
 ---
 
 ## 💻 How to Use
 
 ### 🪙 Merchant View (Dashboard)
-1. Open the GitPay Pages URL in your browser (or open `index.html` locally).
-2. Go to **Settings** and input:
-   - **GitHub Personal Access Token**
-   - **Repository Path** (e.g., `yourusername/gitpay`)
-   - **Extended Public Key** (xpub, ypub, or zpub)
-   - **Network Mode** (Mainnet / Testnet)
-   - **Cloudflare Worker URL** (Optional, for 24/7 check fallback)
-   - **Merchant Master Encryption Key** (Back this key up! Without it, you cannot view invoice descriptions on other devices).
-   - **Payment Tolerance** (e.g. `99.5%`)
-3. Save settings.
-4. Go to **Create Invoice**, input the amount (will convert to Sats in real-time), description, and click **Generate Invoice**.
-5. GitPay will automatically copy the customer payment link to your clipboard!
+1. Go to **Create Invoice**, input the amount, description, and click **Generate Invoice**.
+2. GitPay will derive the address, encrypt the invoice payload, sign the event, publish it to the relays, and copy the customer payment link to your clipboard.
 
 ### 🛒 Customer Payment View
-1. Send the payment link to your client.
-2. The client will see a beautiful checkout page featuring the amount in sats, the derived address, a countdown timer (15 minutes), and a QR Code.
-3. **Instant Feedback:** The page polls the blockchain via `mempool.space` every 8 seconds. As soon as the payment hits the mempool, the screen transitions to a green success state and updates the merchant's ledger immediately.
+1. Send the payment link to your client (e.g. `https://yourdomain.com/?invoice=<address>#key=<invoice_key>`).
+2. The client fetches the encrypted invoice from Nostr, decrypts it client-side with the key in the URL, and displays the payment interface.
+3. Once paid, the client's browser publishes a signed payment receipt to the Nostr relays. The merchant's open dashboard receives the WebSocket notification instantly, verifies the payment on the blockchain, and replaces the invoice event status with "paid".
 
 ---
 
-## 🛠️ Local Development & Testing
-
-To bundle the client-side Bitcoin library yourself after editing `lib-entry.js`:
-```bash
-npm install
-npm run build:lib
-npm run minify:lib
-```
-
----
-
-*Disclaimer: This project is meant for educational and small-scale sovereign merchant purposes. Always secure your xpub privacy, as exposing it allows third parties to trace your wallet balances.*
+*Disclaimer: This project is meant for educational and small-scale sovereign merchant purposes. Always secure your private keys and xpubs.*

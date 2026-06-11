@@ -1,4 +1,4 @@
-const CACHE_NAME = 'gitpay-v3';
+const CACHE_NAME = 'gitpay-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -6,31 +6,26 @@ const ASSETS = [
   './app.js',
   './icon.svg',
   './js/bitcoin.min.js',
+  './js/nostr.js',
   'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
   'https://unpkg.com/lucide@latest'
 ];
 
-// Install Service Worker and cache core files
+// Install and cache
 self.addEventListener('install', event => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      console.log('[Service Worker] Caching app shell');
-      return cache.addAll(ASSETS);
-    })
+    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS))
   );
   self.skipWaiting();
 });
 
-// Activate event - cleanup old caches
+// Activate and cleanup
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys => {
       return Promise.all(
         keys.map(key => {
-          if (key !== CACHE_NAME) {
-            console.log('[Service Worker] Removing old cache', key);
-            return caches.delete(key);
-          }
+          if (key !== CACHE_NAME) return caches.delete(key);
         })
       );
     })
@@ -38,116 +33,218 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
-// Fetch event - network first fallback to cache
+// Fetch events intercept
 self.addEventListener('fetch', event => {
-  // Bypassing non-GET request and third-party APIs from cache first
-  if (event.request.method !== 'GET' || event.request.url.includes('api.github.com') || event.request.url.includes('mempool.space')) {
+  if (event.request.method !== 'GET' || event.request.url.includes('mempool.space')) {
     return;
   }
-  
   event.respondWith(
     fetch(event.request)
       .then(response => {
-        // Cache new successful GET requests
         if (response.status === 200 && event.request.url.startsWith(self.location.origin)) {
-          const responseClone = response.clone();
-          caches.open(CACHE_NAME).then(cache => {
-            cache.put(event.request, responseClone);
-          });
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
         }
         return response;
       })
-      .catch(() => {
-        return caches.match(event.request);
-      })
+      .catch(() => caches.match(event.request))
   );
 });
 
-// Background Sync for offline merchant tracking
+// Background Sync
 self.addEventListener('sync', event => {
   if (event.tag === 'gitpay-poll') {
-    event.waitUntil(pollAndNotify());
+    event.waitUntil(pollAndNotifyNostr());
   }
 });
 
-async function pollAndNotify() {
-  console.log('[Service Worker] Background Sync polling started');
-  // Safe execution block to avoid breaking SW if indexedDB/settings are empty
+// Cryptography Helpers for Service Worker
+async function sha256Hex(message) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const hashBuffer = await self.crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function deriveInvoiceKey(masterKeyHex, index) {
+  return await sha256Hex(`${masterKeyHex}-${index}`);
+}
+
+async function decryptAesGcm(ciphertextBase64, ivBase64, hexKey) {
+  try {
+    const rawKey = new Uint8Array(hexKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+    const key = await self.crypto.subtle.importKey(
+      'raw',
+      rawKey.buffer,
+      { name: 'AES-GCM' },
+      false,
+      ['decrypt']
+    );
+    const ciphertext = new Uint8Array(atob(ciphertextBase64).split('').map(c => c.charCodeAt(0)));
+    const iv = new Uint8Array(atob(ivBase64).split('').map(c => c.charCodeAt(0)));
+    
+    const decryptedBuffer = await self.crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: iv },
+      key,
+      ciphertext
+    );
+    return new TextDecoder().decode(decryptedBuffer);
+  } catch (err) {
+    throw new Error('Decryption failed');
+  }
+}
+
+// Fetch invoices from Nostr relays in SW using basic WebSockets
+function fetchNostrInvoices(relays, pubkey) {
+  return new Promise((resolve) => {
+    const invoices = [];
+    let activeConnections = 0;
+    const targetRelays = relays.slice(0, 3);
+    
+    if (targetRelays.length === 0) resolve([]);
+    
+    const timeout = setTimeout(() => {
+      resolve(invoices);
+    }, 5000);
+    
+    targetRelays.forEach(url => {
+      try {
+        const ws = new WebSocket(url);
+        activeConnections++;
+        
+        ws.onopen = () => {
+          const subId = `sw-${Math.random().toString(36).substring(2, 9)}`;
+          ws.send(JSON.stringify(['REQ', subId, { authors: [pubkey], kinds: [30023] }]));
+        };
+        
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg[0] === 'EVENT') {
+              const event = msg[2];
+              if (!invoices.some(i => i.id === event.id)) {
+                invoices.push(event);
+              }
+            }
+          } catch(err) {}
+        };
+        
+        ws.onclose = ws.onerror = () => {
+          activeConnections--;
+          if (activeConnections <= 0) {
+            clearTimeout(timeout);
+            resolve(invoices);
+          }
+        };
+      } catch(err) {
+        activeConnections--;
+      }
+    });
+  });
+}
+
+// Publish event to Nostr relays in SW
+function publishNostrEvent(relays, event) {
+  const payload = JSON.stringify(['EVENT', event]);
+  relays.slice(0, 3).forEach(url => {
+    try {
+      const ws = new WebSocket(url);
+      ws.onopen = () => {
+        ws.send(payload);
+        setTimeout(() => ws.close(), 1000);
+      };
+    } catch(e) {}
+  });
+}
+
+async function pollAndNotifyNostr() {
+  console.log('[SW] Background Sync started');
   try {
     const settingsRaw = await getFromIndexedDB('gitpay_settings');
     if (!settingsRaw) return;
     const settings = JSON.parse(settingsRaw);
-    if (!settings.ghToken || !settings.ghRepo) return;
+    if (!settings.nostrNsec || !settings.nostrNpub || !settings.extendedKey) return;
 
-    // Fetch open issues labelled 'pending' from GitHub
-    const [owner, repo] = settings.ghRepo.split('/');
-    const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues?labels=pending&state=open`, {
-      headers: {
-        'Authorization': `Bearer ${settings.ghToken}`,
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
-    if (!res.ok) return;
-    const issues = await res.json();
+    // Load libraries for cryptographic functions in service worker
+    self.importScripts('./js/bitcoin.min.js');
 
-    for (const issue of issues) {
-      let invoiceData = {};
+    const relayUrls = (settings.nostrRelays || '')
+      .split('\n')
+      .map(r => r.trim())
+      .filter(r => r.startsWith('wss://') || r.startsWith('ws://'));
+
+    const events = await fetchNostrInvoices(relayUrls, settings.nostrNpub);
+    
+    for (const event of events) {
+      let decrypted = null;
       try {
-        const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
-        if (jsonMatch) invoiceData = JSON.parse(jsonMatch[1].trim());
-      } catch (e) { continue; }
+        const indexTag = event.tags.find(t => t[0] === 'index');
+        if (indexTag) {
+          const index = parseInt(indexTag[1]);
+          const invoiceKey = await deriveInvoiceKey(settings.masterKey, index);
+          const contentObj = JSON.parse(event.content);
+          const decryptedPayloadRaw = await decryptAesGcm(contentObj.ciphertext, contentObj.iv, invoiceKey);
+          decrypted = JSON.parse(decryptedPayloadRaw);
+        }
+      } catch(e) { continue; }
 
-      if (!invoiceData.address || !invoiceData.amount_sats) continue;
+      if (decrypted && decrypted.status === 'pending') {
+        const network = decrypted.network === 'testnet' ? 'testnet/' : '';
+        const mempoolRes = await fetch(`https://mempool.space/${network}api/address/${decrypted.address}`);
+        if (!mempoolRes.ok) continue;
+        const mempoolData = await mempoolRes.json();
+        
+        const confirmed = mempoolData.chain_stats.funded_txo_sum || 0;
+        const unconfirmed = mempoolData.mempool_stats.funded_txo_sum || 0;
+        const totalReceived = confirmed + unconfirmed;
 
-      const network = invoiceData.network === 'testnet' ? 'testnet/' : '';
-      const mempoolRes = await fetch(`https://mempool.space/${network}api/address/${invoiceData.address}`);
-      if (!mempoolRes.ok) continue;
-      const mempoolData = await mempoolRes.json();
-      
-      const confirmed = mempoolData.chain_stats.funded_txo_sum || 0;
-      const unconfirmed = mempoolData.mempool_stats.funded_txo_sum || 0;
-      const totalReceived = confirmed + unconfirmed;
+        const tolerance = settings.tolerance || 99.5;
+        const thresholdSats = decrypted.amount_sats * (tolerance / 100);
 
-      const tolerance = settings.tolerance || 99.5;
-      const thresholdSats = invoiceData.amount_sats * (tolerance / 100);
+        if (totalReceived >= thresholdSats) {
+          // Update status payload
+          const updatedPayload = { ...decrypted, status: 'paid' };
+          const invoiceKey = await deriveInvoiceKey(settings.masterKey, decrypted.index);
+          const encryption = await encryptAesGcm(JSON.stringify(updatedPayload), invoiceKey);
+          const dTag = await sha256Hex(decrypted.address);
 
-      if (totalReceived >= thresholdSats) {
-        // Update GitHub
-        const updateRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issue.number}`, {
-          method: 'PATCH',
-          headers: {
-            'Authorization': `Bearer ${settings.ghToken}`,
-            'Accept': 'application/vnd.github.v3+json',
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            labels: ['paid', 'invoice'],
-            state: 'closed'
-          })
-        });
+          const updatedEvent = {
+            kind: 30023,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [
+              ['d', dTag],
+              ['index', String(decrypted.index)],
+              ['p', settings.nostrNpub]
+            ],
+            content: JSON.stringify({
+              ciphertext: encryption.ciphertext,
+              iv: encryption.iv
+            })
+          };
 
-        if (updateRes.ok) {
+          // Use the imported GitPayLib inside the SW
+          self.GitPayLib.signNostrEvent(updatedEvent, settings.nostrNsec);
+          publishNostrEvent(relayUrls, updatedEvent);
+
           self.registration.showNotification('GitPay Payment Alert', {
-            body: `Invoice #${issue.number} has been paid successfully on-chain!`,
+            body: `Invoice #${decrypted.index} paid successfully! ${totalReceived.toLocaleString()} sats received.`,
             icon: '/icon.svg'
           });
         }
       }
     }
   } catch (err) {
-    console.error('[Service Worker] Background Sync failed:', err);
+    console.error('[SW] Background Sync failed:', err);
   }
 }
 
-// Simple IndexedDB Helper to read settings
 function getFromIndexedDB(key) {
   return new Promise((resolve) => {
     const request = indexedDB.open('gitpay_db', 1);
     request.onupgradeneeded = (e) => {
       const db = e.target.result;
-      if (!db.objectStoreNames.contains('keyvalue')) {
-        db.createObjectStore('keyvalue');
-      }
+      if (!db.objectStoreNames.contains('keyvalue')) db.createObjectStore('keyvalue');
     };
     request.onsuccess = (e) => {
       const db = e.target.result;
@@ -157,9 +254,7 @@ function getFromIndexedDB(key) {
         const getReq = store.get(key);
         getReq.onsuccess = () => resolve(getReq.result || null);
         getReq.onerror = () => resolve(null);
-      } catch (err) {
-        resolve(null);
-      }
+      } catch (err) { resolve(null); }
     };
     request.onerror = () => resolve(null);
   });

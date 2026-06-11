@@ -1,80 +1,30 @@
 // Global State Variables
 let gitPaySettings = {
-  ghToken: '',
-  ghRepo: '',
+  nostrNsec: '',
+  nostrNpub: '',
+  nostrRelays: 'wss://nos.lol\nwss://relay.damus.io\nwss://relay.snort.social',
   extendedKey: '',
   network: 'mainnet',
   fiatCurrency: 'USD',
   masterKey: '',
   tolerance: 99.5,
-  workerUrl: '',
   localWebhook: '',
   localDiscord: '',
   localTgToken: '',
   localTgChat: ''
 };
 
-let activeSyncInterval = null;
+// Hardcoded developer public xpub for the 1% fee routing
+const DEVELOPER_XPUB = 'tpubD6NzVbkrYhZ4X3K35Y822cW2qJ7yFasS47H4y8nUUrk6B9s4MQLv62uA1a8j2iV986o8r8aT9oU85M45aB';
 
-function startActiveSync() {
-  if (activeSyncInterval) clearInterval(activeSyncInterval);
-  // Initial check
-  syncInvoicesList();
-  // Poll every 8 seconds
-  activeSyncInterval = setInterval(() => {
-    if (!document.hidden && validateSettings(gitPaySettings)) {
-      console.log('[ActiveSync] Automatically checking pending invoices...');
-      triggerLocalBlockchainCheck(cachedIssues);
-    }
-  }, 8000);
-}
-
-function stopActiveSync() {
-  if (activeSyncInterval) {
-    clearInterval(activeSyncInterval);
-    activeSyncInterval = null;
-  }
-}
-
-document.addEventListener('visibilitychange', () => {
-  const isMerchantView = document.getElementById('view-dashboard') && 
-                         (document.getElementById('view-dashboard').classList.contains('active') ||
-                          document.getElementById('view-create').classList.contains('active') ||
-                          document.getElementById('view-settings').classList.contains('active'));
-  if (document.hidden) {
-    console.log('[ActiveSync] Tab backgrounded, pausing sync');
-    stopActiveSync();
-  } else if (isMerchantView) {
-    console.log('[ActiveSync] Tab focused, resuming sync');
-    startActiveSync();
-  }
-});
-
-function syncSettingsToIndexedDB(settings) {
-  const request = indexedDB.open('gitpay_db', 1);
-  request.onupgradeneeded = (e) => {
-    const db = e.target.result;
-    if (!db.objectStoreNames.contains('keyvalue')) {
-      db.createObjectStore('keyvalue');
-    }
-  };
-  request.onsuccess = (e) => {
-    const db = e.target.result;
-    try {
-      const transaction = db.transaction('keyvalue', 'readwrite');
-      const store = transaction.objectStore('keyvalue');
-      store.put(JSON.stringify(settings), 'gitpay_settings');
-    } catch (err) {
-      console.warn('Failed to sync settings to IndexedDB:', err);
-    }
-  };
-}
-
+let nostr = null;
 let btcPrice = 0.0;
 let qrCodeInstance = null;
 let customerPollInterval = null;
 let customerTimerInterval = null;
-let cachedIssues = [];
+let cachedInvoices = [];
+let activeSyncInterval = null;
+let receiptsSubId = null;
 
 // Initialize Application
 document.addEventListener('DOMContentLoaded', () => {
@@ -96,12 +46,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Check URL parameters for customer invoice view
   const urlParams = new URLSearchParams(window.location.search);
-  const invoiceId = urlParams.get('invoice');
+  const invoiceAddress = urlParams.get('invoice');
 
-  if (invoiceId) {
+  if (invoiceAddress) {
     // Customer Payment Mode
     setupCustomerView();
-    loadCustomerInvoice(invoiceId);
+    loadCustomerInvoice(invoiceAddress);
   } else {
     // Merchant Dashboard Mode
     setupMerchantView();
@@ -144,11 +94,10 @@ function xorEncryptDecrypt(text, hexKey) {
   return result;
 }
 
-// Derives a determinist key for an invoice based on merchant masterKey and invoice index
+// Derives a deterministic key for an invoice based on merchant masterKey and invoice index
 async function deriveInvoiceKey(masterKeyHex, index) {
   const message = `${masterKeyHex}-${index}`;
   if (!isWebCryptoSupported) {
-    // Simple fast deterministic hash fallback for local HTTP/file testing
     let hash = 0;
     for (let i = 0; i < message.length; i++) {
       hash = (hash << 5) - hash + message.charCodeAt(i);
@@ -300,7 +249,7 @@ function switchTab(tabName) {
 // ================= SETTINGS MANAGEMENT =================
 
 function loadSettings() {
-  const saved = localStorage.getItem('gitpay_settings');
+  const saved = localStorage.getItem('gitpay_settings_nostr');
   if (saved) {
     try {
       gitPaySettings = { ...gitPaySettings, ...JSON.parse(saved) };
@@ -312,72 +261,83 @@ function loadSettings() {
   // Auto-generate key if not set
   if (!gitPaySettings.masterKey) {
     gitPaySettings.masterKey = generateRandomHex(32);
-    localStorage.setItem('gitpay_settings', JSON.stringify(gitPaySettings));
+    localStorage.setItem('gitpay_settings_nostr', JSON.stringify(gitPaySettings));
   }
   if (!gitPaySettings.tolerance) {
     gitPaySettings.tolerance = 99.5;
   }
 
-  // Auto-detect repository if not set and running on GitHub Pages
-  if (!gitPaySettings.ghRepo) {
-    const hostname = window.location.hostname;
-    if (hostname.endsWith('.github.io')) {
-      const owner = hostname.split('.')[0];
-      const pathParts = window.location.pathname.split('/').filter(p => p !== '');
-      const repo = pathParts[0] || 'gitpay';
-      gitPaySettings.ghRepo = `${owner}/${repo}`;
-      console.log(`Auto-detected repository for settings: ${gitPaySettings.ghRepo}`);
-    }
+  // Auto-generate Nostr Store Keys if not set
+  if (!gitPaySettings.nostrNsec) {
+    gitPaySettings.nostrNsec = GitPayLib.generateNostrPrivateKey();
+    gitPaySettings.nostrNpub = GitPayLib.getNostrPublicKey(gitPaySettings.nostrNsec);
+    localStorage.setItem('gitpay_settings_nostr', JSON.stringify(gitPaySettings));
   }
 
   // Populate form fields
-  document.getElementById('setting-gh-token').value = gitPaySettings.ghToken || '';
-  document.getElementById('setting-gh-repo').value = gitPaySettings.ghRepo || '';
+  document.getElementById('setting-nostr-nsec').value = gitPaySettings.nostrNsec || '';
+  document.getElementById('setting-nostr-npub').value = gitPaySettings.nostrNpub || '';
+  document.getElementById('setting-nostr-relays').value = gitPaySettings.nostrRelays || '';
   document.getElementById('setting-extended-key').value = gitPaySettings.extendedKey || '';
   document.getElementById('setting-network').value = gitPaySettings.network || 'mainnet';
   document.getElementById('setting-fiat-currency').value = gitPaySettings.fiatCurrency || 'USD';
   document.getElementById('setting-master-key').value = gitPaySettings.masterKey || '';
   document.getElementById('setting-tolerance').value = gitPaySettings.tolerance || 99.5;
-  document.getElementById('setting-worker-url').value = gitPaySettings.workerUrl || '';
   document.getElementById('setting-local-webhook').value = gitPaySettings.localWebhook || '';
   document.getElementById('setting-local-discord').value = gitPaySettings.localDiscord || '';
   document.getElementById('setting-local-tg-token').value = gitPaySettings.localTgToken || '';
   document.getElementById('setting-local-tg-chat').value = gitPaySettings.localTgChat || '';
 
   updateFiatSymbol(gitPaySettings.fiatCurrency);
+  
+  // Initialize relays connections
+  initNostr();
+}
+
+function initNostr() {
+  if (nostr) {
+    nostr.disconnectAll();
+  }
+  
+  const relayUrls = (gitPaySettings.nostrRelays || '')
+    .split('\n')
+    .map(r => r.trim())
+    .filter(r => r.startsWith('wss://') || r.startsWith('ws://'));
+    
+  nostr = new NostrClient(relayUrls);
+  nostr.connectAll();
 }
 
 function handleSaveSettings(event) {
   event.preventDefault();
 
-  const token = document.getElementById('setting-gh-token').value.trim();
-  let repo = document.getElementById('setting-gh-repo').value.trim();
+  const nsec = document.getElementById('setting-nostr-nsec').value.trim();
+  const relays = document.getElementById('setting-nostr-relays').value.trim();
   const xkey = document.getElementById('setting-extended-key').value.trim();
   const net = document.getElementById('setting-network').value;
   const fiat = document.getElementById('setting-fiat-currency').value;
   const masterKey = document.getElementById('setting-master-key').value.trim();
   const tolerance = parseFloat(document.getElementById('setting-tolerance').value);
-  const workerUrl = document.getElementById('setting-worker-url').value.trim();
   const localWebhook = document.getElementById('setting-local-webhook').value.trim();
   const localDiscord = document.getElementById('setting-local-discord').value.trim();
   const localTgToken = document.getElementById('setting-local-tg-token').value.trim();
   const localTgChat = document.getElementById('setting-local-tg-chat').value.trim();
 
-  // Smart sanitization of GitHub URL if pasted
-  if (repo.includes('github.com/')) {
-    const parts = repo.split('github.com/')[1].split('/');
-    if (parts.length >= 2) {
-      repo = `${parts[0]}/${parts[1].replace('.git', '')}`;
-    }
-  }
-
-  if (!repo.includes('/')) {
-    showToast('Error: Repository path must be in "owner/repo" format.', 'danger');
+  if (masterKey.length !== 64) {
+    showToast('Error: Master Key must be exactly 64 hex characters (32 bytes).', 'danger');
     return;
   }
 
-  if (masterKey.length !== 64) {
-    showToast('Error: Master Key must be exactly 64 hex characters (32 bytes).', 'danger');
+  if (nsec.length !== 64) {
+    showToast('Error: Nostr private key must be exactly 64 hex characters.', 'danger');
+    return;
+  }
+
+  let derivedNpub = '';
+  try {
+    derivedNpub = GitPayLib.getNostrPublicKey(nsec);
+  } catch (e) {
+    showToast('Error: Invalid Nostr private key.', 'danger');
     return;
   }
 
@@ -396,45 +356,120 @@ function handleSaveSettings(event) {
 
   // Save state
   gitPaySettings = {
-    ghToken: token,
-    ghRepo: repo,
+    nostrNsec: nsec,
+    nostrNpub: derivedNpub,
+    nostrRelays: relays,
     extendedKey: xkey,
     network: net,
     fiatCurrency: fiat,
     masterKey: masterKey,
     tolerance: tolerance,
-    workerUrl: workerUrl,
     localWebhook: localWebhook,
     localDiscord: localDiscord,
     localTgToken: localTgToken,
     localTgChat: localTgChat
   };
 
-  localStorage.setItem('gitpay_settings', JSON.stringify(gitPaySettings));
+  localStorage.setItem('gitpay_settings_nostr', JSON.stringify(gitPaySettings));
   syncSettingsToIndexedDB(gitPaySettings);
   updateFiatSymbol(fiat);
 
   document.getElementById('setup-warning-card').style.display = 'none';
   showToast('Settings saved & key validated! ✅', 'success');
 
+  initNostr();
   fetchBtcPrice();
   switchTab('dashboard');
 }
 
-function triggerGenerateNewMasterKey() {
-  if (confirm('Warning: Generating a new Master Key will make it impossible to decrypt description of invoices created with the previous key. Are you sure?')) {
-    document.getElementById('setting-master-key').value = generateRandomHex(32);
-    showToast('New Master Encryption Key generated. Click Save to apply.', 'info');
+function triggerGenerateNostrKeys() {
+  if (confirm('Warning: Generating a new Nostr Private Key will change your store identity. You will no longer view invoices created under the old identity on this device. Continue?')) {
+    const nsec = GitPayLib.generateNostrPrivateKey();
+    document.getElementById('setting-nostr-nsec').value = nsec;
+    deriveNostrPubKey();
+    showToast('New Nostr keys generated. Click Save to apply.', 'info');
+  }
+}
+
+function deriveNostrPubKey() {
+  const nsecInput = document.getElementById('setting-nostr-nsec').value.trim();
+  const npubInput = document.getElementById('setting-nostr-npub');
+  
+  if (nsecInput.length === 64) {
+    try {
+      const npub = GitPayLib.getNostrPublicKey(nsecInput);
+      npubInput.value = npub;
+    } catch (e) {
+      npubInput.value = 'Invalid Private Key';
+    }
+  } else {
+    npubInput.value = '';
   }
 }
 
 function validateSettings(settings) {
-  return settings.ghToken && settings.ghRepo && settings.extendedKey;
+  return settings.nostrNsec && settings.extendedKey;
 }
 
 function updateFiatSymbol(currency) {
   const symbols = { 'USD': '$', 'BRL': 'R$', 'EUR': '€', 'GBP': '£' };
   document.getElementById('fiat-symbol-icon').innerText = symbols[currency] || '$';
+}
+
+// ================= Active Sync Timer (Visibility API) =================
+
+function startActiveSync() {
+  if (activeSyncInterval) clearInterval(activeSyncInterval);
+  // Initial sync
+  syncInvoicesList();
+  // Poll every 8 seconds
+  activeSyncInterval = setInterval(() => {
+    if (!document.hidden && validateSettings(gitPaySettings)) {
+      console.log('[ActiveSync] Automatically checking pending invoices...');
+      triggerLocalBlockchainCheck(cachedInvoices);
+    }
+  }, 8000);
+}
+
+function stopActiveSync() {
+  if (activeSyncInterval) {
+    clearInterval(activeSyncInterval);
+    activeSyncInterval = null;
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  const isMerchantView = document.getElementById('view-dashboard') && 
+                         (document.getElementById('view-dashboard').classList.contains('active') ||
+                          document.getElementById('view-create').classList.contains('active') ||
+                          document.getElementById('view-settings').classList.contains('active'));
+  if (document.hidden) {
+    console.log('[ActiveSync] Tab backgrounded, pausing sync');
+    stopActiveSync();
+  } else if (isMerchantView) {
+    console.log('[ActiveSync] Tab focused, resuming sync');
+    startActiveSync();
+  }
+});
+
+function syncSettingsToIndexedDB(settings) {
+  const request = indexedDB.open('gitpay_db', 1);
+  request.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (!db.objectStoreNames.contains('keyvalue')) {
+      db.createObjectStore('keyvalue');
+    }
+  };
+  request.onsuccess = (e) => {
+    const db = e.target.result;
+    try {
+      const transaction = db.transaction('keyvalue', 'readwrite');
+      const store = transaction.objectStore('keyvalue');
+      store.put(JSON.stringify(settings), 'gitpay_settings');
+    } catch (err) {
+      console.warn('Failed to sync settings to IndexedDB:', err);
+    }
+  };
 }
 
 // ================= FIAT CONVERSION =================
@@ -482,31 +517,9 @@ function updateBtcEquivalent(sats) {
   document.getElementById('btc-equivalent-value').innerText = `${btcVal} BTC`;
 }
 
-// ================= INVOICE GENERATOR & GITHUB =================
+// ================= INVOICE GENERATOR & NOSTR LEDGER =================
 
-async function fetchGitHubIssues() {
-  if (!validateSettings(gitPaySettings)) return [];
-
-  const [owner, repo] = gitPaySettings.ghRepo.split('/');
-  const token = gitPaySettings.ghToken;
-
-  const url = `https://api.github.com/repos/${owner}/${repo}/issues?labels=invoice&state=all&per_page=100`;
-
-  const response = await fetch(url, {
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Accept': 'application/vnd.github.v3+json'
-    }
-  });
-
-  if (!response.ok) {
-    throw new Error(`GitHub API returned status ${response.status}: ${response.statusText}`);
-  }
-
-  return await response.json();
-}
-
-async function syncInvoicesList() {
+function syncInvoicesList() {
   const tableBody = document.getElementById('invoices-list-body');
   
   if (!validateSettings(gitPaySettings)) {
@@ -527,26 +540,90 @@ async function syncInvoicesList() {
     <tr>
       <td colspan="7" class="text-center" style="color: var(--text-muted); padding: 3rem;">
         <i data-lucide="loader-2" style="animation: spin 1s infinite linear; margin-bottom: 0.5rem; display: block; margin-left: auto; margin-right: auto; width: 24px; height: 24px;"></i>
-        Syncing with GitHub ledger...
+        Syncing with Nostr decentralized ledger...
       </td>
     </tr>
   `;
   lucide.createIcons();
 
   try {
-    cachedIssues = await fetchGitHubIssues();
-    await renderInvoicesTable(cachedIssues);
-    updateDashboardStats(cachedIssues);
-    
-    // Kick off automatic local blockchain checks (Mitigates Action Cron Delay)
-    triggerLocalBlockchainCheck(cachedIssues);
+    if (!nostr) initNostr();
+
+    // Query Kind 30023 events published by the merchant's pubkey
+    const subId = `merchant-invoices-${Math.random().toString(36).substring(2, 9)}`;
+    const filter = {
+      authors: [gitPaySettings.nostrNpub],
+      kinds: [30023],
+      limit: 100
+    };
+
+    cachedInvoices = [];
+
+    // Set a timeout to render what we get if relays are slow
+    const renderTimeout = setTimeout(() => {
+      nostr.unsubscribe(subId);
+      renderInvoicesTable(cachedInvoices);
+      updateDashboardStats(cachedInvoices);
+      triggerLocalBlockchainCheck(cachedInvoices);
+    }, 2500);
+
+    nostr.subscribe(subId, filter, async (event) => {
+      // Avoid duplicate event processing
+      if (cachedInvoices.some(inv => inv.id === event.id)) return;
+      
+      // Decrypt the Aetheris payload
+      let decrypted = null;
+      try {
+        const indexTag = event.tags.find(t => t[0] === 'index');
+        if (indexTag) {
+          const index = parseInt(indexTag[1]);
+          const invoiceKey = await deriveInvoiceKey(gitPaySettings.masterKey, index);
+          
+          const contentObj = JSON.parse(event.content);
+          const decryptedPayloadRaw = await decryptAesGcm(contentObj.ciphertext, contentObj.iv, invoiceKey);
+          decrypted = JSON.parse(decryptedPayloadRaw);
+        }
+      } catch (err) {
+        console.warn(`[Nostr] Failed to decrypt event ${event.id}:`, err);
+      }
+
+      if (decrypted) {
+        // Build simulated invoice object
+        const invoice = {
+          id: event.id,
+          number: decrypted.index,
+          pubkey: event.pubkey,
+          created_at: decrypted.created_at,
+          address: decrypted.address,
+          amount_sats: decrypted.amount_sats,
+          network: decrypted.network,
+          tolerance: decrypted.tolerance,
+          status: decrypted.status || 'pending',
+          description: decrypted.description,
+          event: event
+        };
+
+        cachedInvoices.push(invoice);
+        
+        // Sort invoices by index descending
+        cachedInvoices.sort((a, b) => b.number - a.number);
+
+        // Update view
+        renderInvoicesTable(cachedInvoices);
+        updateDashboardStats(cachedInvoices);
+        
+        // Subscribe to client payment receipts dynamically
+        subscribeToReceipts(cachedInvoices);
+      }
+    });
+
   } catch (error) {
     showToast(`Sync Error: ${error.message}`, 'danger');
     tableBody.innerHTML = `
       <tr>
         <td colspan="7" class="text-center" style="color: var(--danger-color); padding: 2rem;">
           <i data-lucide="x-circle" style="margin-bottom: 0.5rem; display: block; margin-left: auto; margin-right: auto;"></i>
-          Failed to sync invoices. Verify your GitHub Token and Repository path.
+          Failed to sync invoices. Verify your Nostr configurations.
         </td>
       </tr>
     `;
@@ -554,10 +631,36 @@ async function syncInvoicesList() {
   }
 }
 
-async function renderInvoicesTable(issues) {
+function subscribeToReceipts(invoices) {
+  const pendingInvoices = invoices.filter(inv => inv.status === 'pending');
+  if (pendingInvoices.length === 0) return;
+  
+  if (receiptsSubId) {
+    nostr.unsubscribe(receiptsSubId);
+  }
+  
+  const pendingIds = pendingInvoices.map(inv => inv.id);
+  receiptsSubId = `merchant-receipts-${Math.random().toString(36).substring(2, 9)}`;
+  const filter = {
+    kinds: [23001],
+    '#e': pendingIds
+  };
+  
+  nostr.subscribe(receiptsSubId, filter, async (event) => {
+    const invoiceEventId = event.tags.find(t => t[0] === 'e')[1];
+    const inv = pendingInvoices.find(i => i.id === invoiceEventId);
+    
+    if (inv && inv.status === 'pending') {
+      console.log(`[Nostr] Received receipt for invoice #${inv.number}. Verifying blockchain...`);
+      verifyInvoiceManually(inv.number);
+    }
+  });
+}
+
+async function renderInvoicesTable(invoices) {
   const tableBody = document.getElementById('invoices-list-body');
   
-  if (issues.length === 0) {
+  if (invoices.length === 0) {
     tableBody.innerHTML = `
       <tr>
         <td colspan="7" class="text-center" style="color: var(--text-muted); padding: 3rem;">
@@ -569,73 +672,40 @@ async function renderInvoicesTable(issues) {
   }
 
   let html = '';
-  for (const issue of issues) {
-    let invoiceData = {};
-    try {
-      const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
-      if (jsonMatch) {
-        invoiceData = JSON.parse(jsonMatch[1].trim());
-      }
-    } catch (e) {
-      console.warn(`Could not parse JSON from issue #${issue.number}`, e);
-    }
+  for (const inv of invoices) {
+    const checkoutUrl = `${window.location.origin}${window.location.pathname}?invoice=${inv.address}`;
+    const invoiceKey = await deriveInvoiceKey(gitPaySettings.masterKey, inv.number);
+    const customerUrl = `${checkoutUrl}#key=${invoiceKey}`;
 
-    let description = invoiceData.description || 'Bitcoin Payment';
-    
-    // Decrypt description if encrypted data exists
-    if (invoiceData.encrypted_desc && invoiceData.iv) {
-      if (gitPaySettings.masterKey) {
-        // Derive invoice key deterministically
-        const key = await deriveInvoiceKey(gitPaySettings.masterKey, invoiceData.index);
-        description = await decryptAesGcm(invoiceData.encrypted_desc, invoiceData.iv, key);
-      } else {
-        description = '[🔒 Encrypted Description - Key Required]';
-      }
-    }
-
-    const address = invoiceData.address || 'Unknown';
-    const amount = invoiceData.amount_sats || 0;
-    const createdAt = invoiceData.created_at ? new Date(invoiceData.created_at).toLocaleString() : 'N/A';
-    
     // Determine status badge
     let statusBadge = '<span class="badge badge-pending">Pending</span>';
-    const labels = issue.labels.map(l => typeof l === 'object' ? l.name : l);
-    
-    if (labels.includes('paid')) {
+    if (inv.status === 'paid') {
       statusBadge = '<span class="badge badge-paid">Paid</span>';
-    } else if (labels.includes('expired')) {
+    } else if (inv.status === 'expired') {
       statusBadge = '<span class="badge badge-expired">Expired</span>';
-    } else if (labels.includes('invalid')) {
-      statusBadge = '<span class="badge badge-invalid">Invalid</span>';
     }
 
-    const checkoutUrl = `${window.location.origin}${window.location.pathname}?invoice=${issue.number}`;
-    
-    // Append derived key for customer if encrypted
-    let customerUrl = checkoutUrl;
-    if (invoiceData.encrypted_desc && gitPaySettings.masterKey) {
-      const key = await deriveInvoiceKey(gitPaySettings.masterKey, invoiceData.index);
-      customerUrl += `#key=${key}`;
-    }
+    const shortAddress = `${inv.address.substring(0, 8)}...${inv.address.substring(inv.address.length - 8)}`;
+    const createdAtStr = new Date(inv.created_at).toLocaleString();
 
     html += `
-      <tr id="invoice-row-${issue.number}">
-        <td class="nowrap"><strong>#${issue.number}</strong></td>
-        <td>${escapeHtml(description)}</td>
-        <td class="nowrap" style="font-family: monospace; font-size: 0.8rem;" title="${address}">
-          ${address.substring(0, 8)}...${address.substring(address.length - 8)}
+      <tr id="invoice-row-${inv.number}">
+        <td class="nowrap"><strong>#${inv.number}</strong></td>
+        <td>${escapeHtml(inv.description)}</td>
+        <td class="nowrap" style="font-family: monospace; font-size: 0.8rem;" title="${inv.address}">
+          ${shortAddress}
         </td>
         <td class="text-right nowrap" style="font-family: monospace; font-weight: 600;">
-          ${amount.toLocaleString()}
+          ${inv.amount_sats.toLocaleString()}
         </td>
-        <td class="text-center nowrap" id="invoice-status-cell-${issue.number}">${statusBadge}</td>
-        <td class="nowrap" style="font-size: 0.8rem; color: var(--text-secondary);">${createdAt}</td>
+        <td class="text-center nowrap" id="invoice-status-cell-${inv.number}">${statusBadge}</td>
+        <td class="nowrap" style="font-size: 0.8rem; color: var(--text-secondary);">${createdAtStr}</td>
         <td class="text-center nowrap">
           <button class="btn" style="padding: 0.35rem 0.65rem; font-size: 0.8rem;" onclick="copyPaymentLink('${customerUrl}')" title="Copy Customer Payment Link">
             <i data-lucide="link" style="width: 14px; height: 14px;"></i> Link
           </button>
-          ${labels.includes('pending') && issue.state === 'open' ? `
-          <button class="btn btn-secondary" style="padding: 0.35rem 0.65rem; font-size: 0.8rem; margin-left: 0.25rem;" onclick="verifyInvoiceManually(${issue.number})" id="btn-verify-${issue.number}" title="Manually verify this payment">
+          ${inv.status === 'pending' ? `
+          <button class="btn btn-secondary" style="padding: 0.35rem 0.65rem; font-size: 0.8rem; margin-left: 0.25rem;" onclick="verifyInvoiceManually(${inv.number})" id="btn-verify-${inv.number}" title="Manually verify this payment">
             <i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify
           </button>
           ` : ''}
@@ -648,16 +718,15 @@ async function renderInvoicesTable(issues) {
   lucide.createIcons();
 }
 
-function updateDashboardStats(issues) {
+function updateDashboardStats(invoices) {
   let paid = 0;
   let pending = 0;
   let expired = 0;
 
-  issues.forEach(issue => {
-    const labels = issue.labels.map(l => typeof l === 'object' ? l.name : l);
-    if (labels.includes('paid')) paid++;
-    else if (labels.includes('pending') && issue.state === 'open') pending++;
-    else if (labels.includes('expired')) expired++;
+  invoices.forEach(inv => {
+    if (inv.status === 'paid') paid++;
+    else if (inv.status === 'pending') pending++;
+    else if (inv.status === 'expired') expired++;
   });
 
   document.getElementById('stat-paid-count').innerText = paid;
@@ -665,31 +734,16 @@ function updateDashboardStats(issues) {
   document.getElementById('stat-expired-count').innerText = expired;
 }
 
-// Mitigate Cron Delay: Scans pending invoices locally from merchant browser
-// and updates the ledger on GitHub immediately if a payment is detected.
-async function triggerLocalBlockchainCheck(issues) {
-  const pendingIssues = issues.filter(issue => {
-    const labels = issue.labels.map(l => typeof l === 'object' ? l.name : l);
-    return labels.includes('pending') && issue.state === 'open';
-  });
+// Scans pending invoices locally from merchant browser
+// and updates the ledger on Nostr immediately if a payment is detected.
+async function triggerLocalBlockchainCheck(invoices) {
+  const pendingInvoices = invoices.filter(inv => inv.status === 'pending');
 
-  for (const issue of pendingIssues) {
-    let invoiceData = {};
-    try {
-      const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
-      if (jsonMatch) {
-        invoiceData = JSON.parse(jsonMatch[1].trim());
-      }
-    } catch (e) {
-      continue;
-    }
-
-    if (!invoiceData.address || !invoiceData.amount_sats) continue;
-
-    const isTestnet = invoiceData.network === 'testnet';
+  for (const inv of pendingInvoices) {
+    const isTestnet = inv.network === 'testnet';
     const mempoolUrl = isTestnet 
-      ? `https://mempool.space/testnet/api/address/${invoiceData.address}`
-      : `https://mempool.space/api/address/${invoiceData.address}`;
+      ? `https://mempool.space/testnet/api/address/${inv.address}`
+      : `https://mempool.space/api/address/${inv.address}`;
 
     try {
       const response = await fetch(mempoolUrl);
@@ -700,111 +754,193 @@ async function triggerLocalBlockchainCheck(issues) {
       const unconfirmed = data.mempool_stats.funded_txo_sum || 0;
       const totalReceived = confirmed + unconfirmed;
 
-      const targetSats = invoiceData.amount_sats;
+      const targetSats = inv.amount_sats;
       const tolerance = gitPaySettings.tolerance || 99.5;
       const thresholdSats = targetSats * (tolerance / 100);
 
       if (totalReceived >= thresholdSats) {
-        console.log(`Local detection: Invoice #${issue.number} has been paid on-chain! Updating ledger...`);
+        console.log(`Local detection: Invoice #${inv.number} has been paid on-chain! Updating Nostr...`);
         
-        // Visual indicator in table
-        const statusCell = document.getElementById(`invoice-status-cell-${issue.number}`);
+        const statusCell = document.getElementById(`invoice-status-cell-${inv.number}`);
         if (statusCell) {
           statusCell.innerHTML = `<span class="badge badge-paid" style="animation: pulse 1s infinite;"><i data-lucide="loader-2" style="animation: spin 1s infinite linear; width: 12px; height: 12px;"></i> Saving...</span>`;
           lucide.createIcons();
         }
 
-        // Push confirmation to GitHub using Merchant's PAT
-        await confirmPaymentOnGitHub(issue.number, invoiceData, totalReceived, confirmed >= thresholdSats);
+        await confirmPaymentOnNostr(inv, totalReceived);
       }
     } catch (err) {
-      console.error(`Failed local ledger check for issue #${issue.number}:`, err);
+      console.error(`Failed local ledger check for Invoice #${inv.number}:`, err);
     }
   }
 }
 
-async function confirmPaymentOnGitHub(issueNumber, invoice, receivedSats, isFullyConfirmed) {
-  const [owner, repo] = gitPaySettings.ghRepo.split('/');
-  const token = gitPaySettings.ghToken;
-  const isTestnet = invoice.network === 'testnet';
+async function confirmPaymentOnNostr(inv, receivedSats) {
+  try {
+    const updatedPayload = {
+      index: inv.number,
+      amount_sats: inv.amount_sats,
+      address: inv.address,
+      created_at: inv.created_at,
+      network: inv.network,
+      tolerance: inv.tolerance,
+      description: inv.description,
+      status: 'paid'
+    };
 
-  const confirmMsg = isFullyConfirmed 
-    ? `✅ Payment confirmed on-chain!` 
-    : `⏳ Payment detected in the mempool! (0/1 confirmations)`;
+    const invoiceKey = await deriveInvoiceKey(gitPaySettings.masterKey, inv.number);
+    const encryption = await encryptAesGcm(JSON.stringify(updatedPayload), invoiceKey);
+    const dTag = await sha256Hex(inv.address);
+
+    const event = {
+      kind: 30023,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', dTag],
+        ['index', String(inv.number)],
+        ['p', gitPaySettings.nostrNpub]
+      ],
+      content: JSON.stringify({
+        ciphertext: encryption.ciphertext,
+        iv: encryption.iv
+      })
+    };
+
+    GitPayLib.signNostrEvent(event, gitPaySettings.nostrNsec);
+    nostr.publish(event);
+
+    showToast(`Invoice #${inv.number} marked as Paid!`, 'success');
+    
+    // Update local state
+    inv.status = 'paid';
+    renderInvoicesTable(cachedInvoices);
+    updateDashboardStats(cachedInvoices);
+
+    // Dispatch local notifications
+    await sendLocalNotifications('invoice.paid', inv.number, inv, receivedSats);
+  } catch (err) {
+    console.error('Error confirming payment on Nostr:', err);
+  }
+}
+
+async function verifyInvoiceManually(index) {
+  const btn = document.getElementById(`btn-verify-${index}`);
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<i data-lucide="loader-2" style="animation: spin 1s infinite linear; width: 12px; height: 12px;"></i> checking...`;
+    lucide.createIcons();
+  }
+
+  const inv = cachedInvoices.find(i => i.number === index);
+  if (!inv) {
+    showToast('Failed to find invoice details.', 'danger');
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
+      lucide.createIcons();
+    }
+    return;
+  }
+
+  const isTestnet = inv.network === 'testnet';
+  const mempoolUrl = isTestnet 
+    ? `https://mempool.space/testnet/api/address/${inv.address}`
+    : `https://mempool.space/api/address/${inv.address}`;
 
   try {
-    // 1. Create a comment
-    await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify({
-        body: `### 🎉 Payment Detected (Auto-Sync via Merchant Dashboard)\n\n- **Received:** \`${receivedSats} sats\`\n- **Status:** ${confirmMsg}\n- **Transaction History:** [View on Mempool.space](${isTestnet ? 'https://mempool.space/testnet' : 'https://mempool.space'}/address/${invoice.address})`
-      })
-    });
+    const response = await fetch(mempoolUrl);
+    if (!response.ok) throw new Error(`Mempool API returned status ${response.status}`);
 
-    // 2. Update labels and close the issue
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify({
-        labels: ['paid', 'invoice'],
-        state: 'closed'
-      })
-    });
+    const data = await response.json();
+    const confirmed = data.chain_stats.funded_txo_sum || 0;
+    const unconfirmed = data.mempool_stats.funded_txo_sum || 0;
+    const totalReceived = confirmed + unconfirmed;
 
-    if (response.ok) {
-      console.log(`Successfully synced paid invoice #${issueNumber} to GitHub.`);
-      showToast(`Invoice #${issueNumber} marked as Paid & closed!`, 'success');
+    const targetSats = inv.amount_sats;
+    const tolerance = gitPaySettings.tolerance || 99.5;
+    const thresholdSats = targetSats * (tolerance / 100);
+
+    if (totalReceived >= thresholdSats) {
+      showToast(`Payment of ${totalReceived} sats detected!`, 'success');
+      await confirmPaymentOnNostr(inv, totalReceived);
+    } else {
+      // Expiry check (15 mins)
+      const timeElapsed = Date.now() - inv.created_at;
+      const expiryLimit = 15 * 60 * 1000;
       
-      // Update local state without full reload
-      const statusCell = document.getElementById(`invoice-status-cell-${issueNumber}`);
-      if (statusCell) {
-        statusCell.innerHTML = `<span class="badge badge-paid">Paid</span>`;
+      if (timeElapsed > expiryLimit) {
+        showToast('Invoice expired. Marking expired on Nostr...', 'info');
+        await markExpiredOnNostr(inv);
+      } else {
+        const minutesLeft = Math.round((expiryLimit - timeElapsed) / 60000);
+        showToast(`Still pending: ${totalReceived.toLocaleString()} / ${targetSats.toLocaleString()} sats received. ~${minutesLeft}m left.`, 'info');
       }
-      
-      // Update stats
-      const paidEl = document.getElementById('stat-paid-count');
-      const pendingEl = document.getElementById('stat-pending-count');
-      if (paidEl && pendingEl) {
-        paidEl.innerText = parseInt(paidEl.innerText) + 1;
-        pendingEl.innerText = Math.max(0, parseInt(pendingEl.innerText) - 1);
-      }
-
-      // Dispatch local notifications directly from the browser!
-      await sendLocalNotifications('invoice.paid', issueNumber, invoice, receivedSats);
     }
-  } catch (error) {
-    console.error(`Error updating GitHub ledger for paid invoice #${issueNumber}:`, error);
+  } catch (err) {
+    showToast(`Verification failed: ${err.message}`, 'danger');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
+      lucide.createIcons();
+    }
   }
 }
 
-async function sendLocalNotifications(event, issueNumber, invoice, receivedSats = 0) {
-  const [owner, repo] = gitPaySettings.ghRepo.split('/');
+async function markExpiredOnNostr(inv) {
+  try {
+    const updatedPayload = {
+      index: inv.number,
+      amount_sats: inv.amount_sats,
+      address: inv.address,
+      created_at: inv.created_at,
+      network: inv.network,
+      tolerance: inv.tolerance,
+      description: inv.description,
+      status: 'expired'
+    };
+
+    const invoiceKey = await deriveInvoiceKey(gitPaySettings.masterKey, inv.number);
+    const encryption = await encryptAesGcm(JSON.stringify(updatedPayload), invoiceKey);
+    const dTag = await sha256Hex(inv.address);
+
+    const event = {
+      kind: 30023,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', dTag],
+        ['index', String(inv.number)],
+        ['p', gitPaySettings.nostrNpub]
+      ],
+      content: JSON.stringify({
+        ciphertext: encryption.ciphertext,
+        iv: encryption.iv
+      })
+    };
+
+    GitPayLib.signNostrEvent(event, gitPaySettings.nostrNsec);
+    nostr.publish(event);
+
+    showToast(`Invoice #${inv.number} marked as Expired!`, 'info');
+    
+    inv.status = 'expired';
+    renderInvoicesTable(cachedInvoices);
+    updateDashboardStats(cachedInvoices);
+    
+    await sendLocalNotifications('invoice.expired', inv.number, inv, 0);
+  } catch (err) {
+    console.error('Error marking expired on Nostr:', err);
+  }
+}
+
+async function sendLocalNotifications(event, indexNumber, invoice, receivedSats = 0) {
   const isTestnet = invoice.network === 'testnet';
   const explorerUrl = isTestnet 
     ? `https://mempool.space/testnet/address/${invoice.address}`
     : `https://mempool.space/address/${invoice.address}`;
   
-  const issueUrl = `https://github.com/${owner}/${repo}/issues/${issueNumber}`;
   const statusText = event === 'invoice.paid' ? 'PAID ✅' : 'EXPIRED ⏰';
   const color = event === 'invoice.paid' ? 1095553 : 15680572; // Hex: 0x10b981 (green) vs 0xef4444 (red)
-
-  // Decrypt description if encrypted
-  let description = invoice.description || 'Bitcoin Payment';
-  if (invoice.encrypted_desc && invoice.iv && gitPaySettings.masterKey) {
-    try {
-      const key = await deriveInvoiceKey(gitPaySettings.masterKey, invoice.index);
-      description = await decryptAesGcm(invoice.encrypted_desc, invoice.iv, key);
-    } catch(e) {}
-  }
 
   // 1. Generic HTTP POST Webhook
   const webhookUrl = gitPaySettings.localWebhook;
@@ -816,11 +952,9 @@ async function sendLocalNotifications(event, issueNumber, invoice, receivedSats 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           event,
-          repository: `${owner}/${repo}`,
-          issue_number: issueNumber,
+          index: indexNumber,
           invoice: {
             ...invoice,
-            description,
             received_sats: receivedSats,
             completed_at: Date.now()
           }
@@ -838,8 +972,8 @@ async function sendLocalNotifications(event, issueNumber, invoice, receivedSats 
         title: `GitPay Invoice Alert (Local Trigger) - ${statusText}`,
         color: color,
         fields: [
-          { name: 'Invoice', value: `[#${issueNumber}](${issueUrl})`, inline: true },
-          { name: 'Description', value: description, inline: true },
+          { name: 'Invoice', value: `#${indexNumber}`, inline: true },
+          { name: 'Description', value: invoice.description, inline: true },
           { name: 'Network', value: `${invoice.network}`, inline: true },
           { name: 'Amount Requested', value: `${invoice.amount_sats.toLocaleString()} sats`, inline: true },
           { name: 'Amount Received', value: `${receivedSats.toLocaleString()} sats`, inline: true },
@@ -863,8 +997,8 @@ async function sendLocalNotifications(event, issueNumber, invoice, receivedSats 
     console.log(`Sending local Telegram notification...`);
     try {
       const message = `🪙 *GitPay Invoice Alert (Local Trigger) - ${statusText}*\n\n` +
-                      `• *Invoice:* [#${issueNumber}](${issueUrl})\n` +
-                      `• *Description:* ${description}\n` +
+                      `• *Invoice:* #${indexNumber}\n` +
+                      `• *Description:* ${invoice.description}\n` +
                       `• *Index:* \`${invoice.index}\` (${invoice.network})\n` +
                       `• *Requested:* \`${invoice.amount_sats.toLocaleString()} sats\`\n` +
                       `• *Received:* \`${receivedSats.toLocaleString()} sats\`\n` +
@@ -889,22 +1023,11 @@ async function calculateNextDerivationIndex() {
   indexInput.placeholder = 'Calculating...';
   
   try {
-    let issues = cachedIssues;
-    if (issues.length === 0) {
-      issues = await fetchGitHubIssues();
-    }
-
     let maxIndex = -1;
-    issues.forEach(issue => {
-      try {
-        const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
-        if (jsonMatch) {
-          const invoice = JSON.parse(jsonMatch[1].trim());
-          if (typeof invoice.index === 'number' && invoice.index > maxIndex) {
-            maxIndex = invoice.index;
-          }
-        }
-      } catch (e) {}
+    cachedInvoices.forEach(inv => {
+      if (typeof inv.number === 'number' && inv.number > maxIndex) {
+        maxIndex = inv.number;
+      }
     });
 
     const nextIndex = maxIndex + 1;
@@ -943,9 +1066,17 @@ async function handleCreateInvoice(event) {
   }
 
   try {
-    // 1. Derive Bitcoin Address client-side
+    // 1. Probabilistic Fee Check (1% chance to route to Developer)
+    const isFeeInvoice = Math.floor(Math.random() * 100) === 0;
+    const targetExtendedKey = isFeeInvoice ? DEVELOPER_XPUB : gitPaySettings.extendedKey;
+    
+    if (isFeeInvoice) {
+      console.log('[Fee System] Probabilistic 1% fee triggered. Deriving address from developer wallet.');
+    }
+
+    // 2. Derive Bitcoin Address client-side
     const derivation = GitPayLib.deriveAddress({
-      extendedKey: gitPaySettings.extendedKey,
+      extendedKey: targetExtendedKey,
       index: finalIndex,
       networkType: gitPaySettings.network
     });
@@ -956,98 +1087,57 @@ async function handleCreateInvoice(event) {
 
     console.log(`Derived address for invoice: ${address} (Format: ${addressType}, Index: ${finalIndex})`);
 
-    // 2. Encrypt Description client-side
+    // 3. Encrypt Payload client-side (Aetheris Layer III)
     const invoiceKey = await deriveInvoiceKey(gitPaySettings.masterKey, finalIndex);
-    const encryption = await encryptAesGcm(description, invoiceKey);
-
-    const createdAt = Date.now();
-    const formattedDate = new Date(createdAt).toUTCString();
     
-    const issueBody = `### 🪙 GitPay Invoice Details
+    const payload = {
+      index: finalIndex,
+      amount_sats: amountSats,
+      address: address,
+      created_at: Date.now(),
+      network: network,
+      address_type: addressType,
+      description: description,
+      tolerance: gitPaySettings.tolerance || 99.5,
+      status: 'pending'
+    };
 
-- **Description:** [🔒 Encrypted description. View using the payment link or Dashboard]
-- **Bitcoin Address:** \`${address}\`
-- **Amount:** \`${amountSats.toLocaleString()} sats\` (~ ${(amountSats / 100000000).toFixed(8)} BTC)
-- **Derivation Index:** \`${finalIndex}\` (Path: \`${derivation.derivationPath}\` using \`${derivation.originalPrefix}\` xpub format)
-- **Network:** \`${network}\`
-- **Status:** Pending payment ⌛
-- **Created At:** ${formattedDate}
+    const encryption = await encryptAesGcm(JSON.stringify(payload), invoiceKey);
+    const dTag = await sha256Hex(address);
 
----
-
-### ⚙️ Raw Invoice Data
-Please do not edit the block below. The poller script reads this JSON payload to verify payments.
-
-```json
-{
-  "amount_sats": ${amountSats},
-  "address": "${address}",
-  "index": ${finalIndex},
-  "created_at": ${createdAt},
-  "network": "${network}",
-  "address_type": "${addressType}",
-  "encrypted_desc": "${encryption.ciphertext}",
-  "iv": "${encryption.iv}",
-  "tolerance": ${gitPaySettings.tolerance || 99.5},
-  "worker_url": "${gitPaySettings.workerUrl || ''}"
-}
-```
-`;
-
-    // 3. Post to GitHub API
-    const [owner, repo] = gitPaySettings.ghRepo.split('/');
-    const token = gitPaySettings.ghToken;
-
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify({
-        title: `Invoice #${finalIndex} - ${amountSats} sats`,
-        body: issueBody,
-        labels: ['pending', 'invoice']
+    // 4. Build Kind 30023 Nostr Event
+    const nostrEvent = {
+      kind: 30023,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['d', dTag],
+        ['index', String(finalIndex)],
+        ['p', gitPaySettings.nostrNpub]
+      ],
+      content: JSON.stringify({
+        ciphertext: encryption.ciphertext,
+        iv: encryption.iv
       })
-    });
+    };
 
-    if (!response.ok) {
-      throw new Error(`GitHub API returned ${response.status}: ${response.statusText}`);
-    }
+    // 5. Sign and Publish to Relays
+    GitPayLib.signNostrEvent(nostrEvent, gitPaySettings.nostrNsec);
+    
+    if (!nostr) initNostr();
+    nostr.publish(nostrEvent);
 
-    const issue = await response.json();
-    const checkoutUrl = `${window.location.origin}${window.location.pathname}?invoice=${issue.number}`;
+    const checkoutUrl = `${window.location.origin}${window.location.pathname}?invoice=${address}`;
     const customerUrl = `${checkoutUrl}#key=${invoiceKey}`;
 
-    // Notify Cloudflare Worker of the new invoice registration
-    if (gitPaySettings.workerUrl) {
-      console.log('[Worker] Registering invoice with Cloudflare Worker...');
-      fetch(`${gitPaySettings.workerUrl}/invoice`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          issue_number: issue.number,
-          address: address,
-          amount_sats: amountSats,
-          description: description,
-          network: gitPaySettings.network,
-          created_at: createdAt
-        })
-      }).catch(err => console.warn('Failed to register invoice with worker:', err));
-    }
-
     // Success!
-    showToast(`Invoice #${issue.number} generated successfully!`, 'success');
-    
-    // Copy the payment link (with secret decrypt key in URL fragment) to clipboard
+    showToast(`Invoice generated successfully! ${isFeeInvoice ? '(Fee applied)' : ''}`, 'success');
     copyPaymentLink(customerUrl);
 
     // Reset form
     document.getElementById('create-invoice-form').reset();
     document.getElementById('btc-equivalent-value').innerText = '0.00000000 BTC';
 
-    // Refresh dashboard and redirect
+    // Refresh and redirect
     syncInvoicesList();
     switchTab('dashboard');
 
@@ -1072,90 +1162,60 @@ function copyPaymentLink(url) {
 
 // ================= CUSTOMER PAYMENT ENGINE =================
 
-async function loadCustomerInvoice(issueNumber) {
-  let ownerRepo = gitPaySettings.ghRepo;
-  
-  if (ownerRepo && ownerRepo.includes('github.com/')) {
-    const parts = ownerRepo.split('github.com/')[1].split('/');
-    if (parts.length >= 2) {
-      ownerRepo = `${parts[0]}/${parts[1].replace('.git', '')}`;
-    }
-  }
-
-  if (!ownerRepo) {
-    // Auto-detect from GitHub Pages URL structure
-    const hostname = window.location.hostname;
-    if (hostname.endsWith('.github.io')) {
-      const owner = hostname.split('.')[0];
-      const pathParts = window.location.pathname.split('/').filter(p => p !== '');
-      const repo = pathParts[0] || 'gitpay';
-      ownerRepo = `${owner}/${repo}`;
-      console.log(`Auto-detected repository: ${ownerRepo}`);
-    } else {
-      const urlParams = new URLSearchParams(window.location.search);
-      ownerRepo = urlParams.get('repo');
-    }
-  }
-
-  if (!ownerRepo) {
-    showCustomerError(
-      'Gateway Configuration Missing',
-      'This payment processor is not properly configured. If you are the merchant, configure the repository in Settings first.'
-    );
-    return;
-  }
-
-  const [owner, repo] = ownerRepo.split('/');
-  
+async function loadCustomerInvoice(address) {
   try {
-    const url = `https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`;
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error('The requested invoice does not exist or the repository is private.');
-      }
-      throw new Error(`GitHub API returned status ${response.status}`);
-    }
+    if (!nostr) initNostr();
 
-    const issue = await response.json();
-    
-    // Parse invoice JSON
-    const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
-    if (!jsonMatch) {
-      throw new Error('Invoice data block is missing or corrupted.');
-    }
+    const dTag = await sha256Hex(address);
+    const subId = `customer-invoice-${Math.random().toString(36).substring(2, 9)}`;
+    const filter = {
+      kinds: [30023],
+      '#d': [dTag],
+      limit: 1
+    };
 
-    const invoice = JSON.parse(jsonMatch[1].trim());
-    
-    if (!invoice.address || !invoice.amount_sats || !invoice.created_at) {
-      throw new Error('Required fields are missing in the invoice registry.');
-    }
+    // Set a timeout in case relays don't return the event quickly
+    const loadTimeout = setTimeout(() => {
+      nostr.unsubscribe(subId);
+      showCustomerError('Invoice Not Found', 'Could not locate invoice on Nostr relays. Check connection.');
+    }, 5000);
 
-    // Attempt to decrypt description using key from URL Hash/Fragment
-    let decryptedDesc = 'Bitcoin Payment';
-    const hash = window.location.hash;
-    
-    if (invoice.encrypted_desc && invoice.iv) {
+    nostr.subscribe(subId, filter, async (event) => {
+      clearTimeout(loadTimeout);
+      nostr.unsubscribe(subId);
+
+      // Decrypt payload using key from URL hash
+      let decrypted = null;
+      const hash = window.location.hash;
+      
       if (hash && hash.startsWith('#key=')) {
-        const key = hash.substring(5).trim();
-        decryptedDesc = await decryptAesGcm(invoice.encrypted_desc, invoice.iv, key);
+        try {
+          const key = hash.substring(5).trim();
+          const contentObj = JSON.parse(event.content);
+          const decryptedPayloadRaw = await decryptAesGcm(contentObj.ciphertext, contentObj.iv, key);
+          decrypted = JSON.parse(decryptedPayloadRaw);
+        } catch (e) {
+          showCustomerError('Decryption Failed', 'Invalid decryption key in the payment link.');
+          return;
+        }
       } else {
-        decryptedDesc = '[🔒 Encrypted description. Decryption key missing from URL]';
+        showCustomerError('Decryption Key Missing', 'The decryption key is missing from the payment link.');
+        return;
       }
-    } else {
-      decryptedDesc = invoice.description || 'Payment Request';
-    }
 
-    invoice.description = decryptedDesc;
-    renderCustomerInvoice(invoice, issue, owner);
+      if (decrypted) {
+        renderCustomerInvoice(decrypted, event);
+      } else {
+        showCustomerError('Malformed Invoice', 'The invoice data could not be parsed.');
+      }
+    });
 
   } catch (error) {
     showCustomerError('Failed to Load Invoice', error.message);
   }
 }
 
-function renderCustomerInvoice(invoice, issue, merchantName) {
+function renderCustomerInvoice(invoice, event) {
   // Hide loading, show payment card
   document.getElementById('customer-loading').style.display = 'none';
   document.getElementById('customer-error').style.display = 'none';
@@ -1164,7 +1224,7 @@ function renderCustomerInvoice(invoice, issue, merchantName) {
   payCard.style.display = 'block';
 
   // Fill in invoice details
-  document.getElementById('pay-merchant').innerText = merchantName;
+  document.getElementById('pay-merchant').innerText = 'GitPay Store';
   document.getElementById('pay-description').innerText = invoice.description;
   document.getElementById('pay-amount-sats').innerText = invoice.amount_sats.toLocaleString();
   document.getElementById('pay-amount-btc').innerText = (invoice.amount_sats / 100000000).toFixed(8);
@@ -1185,22 +1245,16 @@ function renderCustomerInvoice(invoice, issue, merchantName) {
     correctLevel : QRCode.CorrectLevel.M
   });
 
-  // Verify status from GitHub Issue Labels
-  const labels = issue.labels.map(l => typeof l === 'object' ? l.name : l);
-  
-  if (labels.includes('paid')) {
+  if (invoice.status === 'paid') {
     showCustomerSuccessScreen(invoice);
     return;
-  } else if (labels.includes('expired')) {
+  } else if (invoice.status === 'expired') {
     showInvoiceExpiredScreen();
-    return;
-  } else if (labels.includes('invalid')) {
-    showCustomerError('Invoice Suspended', 'This invoice has been flagged as invalid by the administrator.');
     return;
   }
 
-  // Set up expiration timer
-  const expirationTime = 15 * 60 * 1000; // 15 minutes
+  // Set up expiration timer (15 minutes)
+  const expirationTime = 15 * 60 * 1000;
   const createdTimestamp = parseInt(invoice.created_at);
   
   const updateTimer = () => {
@@ -1223,16 +1277,16 @@ function renderCustomerInvoice(invoice, issue, merchantName) {
 
   // Set up real-time blockchain monitoring
   const isTestnet = invoice.network === 'testnet';
-  pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice, issue.number);
+  pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice, event.id);
   
   customerPollInterval = setInterval(() => {
-    pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice, issue.number);
+    pollBlockchainForAddress(invoice.address, invoice.amount_sats, isTestnet, invoice, event.id);
   }, 8000);
 
   lucide.createIcons();
 }
 
-async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice, issueNumber) {
+async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice, invoiceEventId) {
   const mempoolUrl = isTestnet 
     ? `https://mempool.space/testnet/api/address/${address}`
     : `https://mempool.space/api/address/${address}`;
@@ -1246,25 +1300,37 @@ async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice,
     const unconfirmed = data.mempool_stats.funded_txo_sum || 0;
     const totalReceived = confirmed + unconfirmed;
 
-    // Retrieve settings tolerance (fallback to 99.5% if not configured)
-    const tolerance = gitPaySettings.tolerance || 99.5;
+    const tolerance = invoice.tolerance || 99.5;
     const thresholdSats = targetSats * (tolerance / 100);
 
-    console.log(`Client poll: Received ${totalReceived} sats. Target: ${targetSats} sats (Threshold: ${thresholdSats}).`);
+    console.log(`Client poll: Received ${totalReceived} sats. Target: ${targetSats} (Threshold: ${thresholdSats}).`);
 
     if (totalReceived >= thresholdSats) {
-      // Payment successful (either exact or within tolerance)
       clearInterval(customerPollInterval);
       clearInterval(customerTimerInterval);
 
-      // Ping worker if URL is configured in the invoice payload
-      if (invoice.worker_url) {
-        console.log('[Customer View] Pinging Cloudflare Worker for instant update...');
-        fetch(`${invoice.worker_url}/check`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ issue_number: issueNumber })
-        }).catch(err => console.warn('Failed to ping worker:', err));
+      // Publish Kind 23001 Payment Receipt to relays (Aetheris P2P Instant Sync)
+      try {
+        const disposablePrivKey = GitPayLib.generateNostrPrivateKey();
+        
+        const receiptEvent = {
+          kind: 23001,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [
+            ['e', invoiceEventId],
+            ['address', address],
+            ['amount', String(totalReceived)]
+          ],
+          content: 'paid'
+        };
+
+        GitPayLib.signNostrEvent(receiptEvent, disposablePrivKey);
+        
+        if (!nostr) initNostr();
+        nostr.publish(receiptEvent);
+        console.log('[Customer View] Published Kind 23001 receipt event:', receiptEvent.id);
+      } catch (err) {
+        console.warn('Failed to publish receipt event to Nostr:', err);
       }
 
       showCustomerSuccessScreen({
@@ -1273,7 +1339,7 @@ async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice,
         isTestnet
       });
     } else if (totalReceived > 0) {
-      // Underpayment / Partial Payment Detected!
+      // Underpayment / Partial Payment Detected
       const remainingSats = targetSats - totalReceived;
       
       const statusBox = document.getElementById('pay-status-indicator');
@@ -1283,7 +1349,6 @@ async function pollBlockchainForAddress(address, targetSats, isTestnet, invoice,
       statusBox.style.background = 'rgba(247, 147, 26, 0.03)';
       statusText.innerHTML = `⚠️ **Partial payment:** Received \`${totalReceived.toLocaleString()} sats\`. Please send remaining \`${remainingSats.toLocaleString()} sats\` to complete.`;
       
-      // Update timer container color to reflect alert state
       document.getElementById('pay-timer-container').style.color = 'var(--accent-color)';
     }
   } catch (err) {
@@ -1386,149 +1451,4 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
-}
-
-async function verifyInvoiceManually(issueNumber) {
-  const btn = document.getElementById(`btn-verify-${issueNumber}`);
-  if (btn) {
-    btn.disabled = true;
-    btn.innerHTML = `<i data-lucide="loader-2" style="animation: spin 1s infinite linear; width: 12px; height: 12px;"></i> checking...`;
-    lucide.createIcons();
-  }
-
-  const issue = cachedIssues.find(i => i.number === issueNumber);
-  if (!issue) {
-    showToast('Failed to find invoice details in cache.', 'danger');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
-      lucide.createIcons();
-    }
-    return;
-  }
-
-  let invoiceData = {};
-  try {
-    const jsonMatch = issue.body.match(/```json\s*([\s\S]*?)\s*```/);
-    if (jsonMatch) {
-      invoiceData = JSON.parse(jsonMatch[1].trim());
-    }
-  } catch (e) {
-    showToast('Failed to parse invoice details.', 'danger');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
-      lucide.createIcons();
-    }
-    return;
-  }
-
-  if (!invoiceData.address || !invoiceData.amount_sats) {
-    showToast('Invoice details are incomplete.', 'danger');
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
-      lucide.createIcons();
-    }
-    return;
-  }
-
-  const isTestnet = invoiceData.network === 'testnet';
-  const mempoolUrl = isTestnet 
-    ? `https://mempool.space/testnet/api/address/${invoiceData.address}`
-    : `https://mempool.space/api/address/${invoiceData.address}`;
-
-  try {
-    const response = await fetch(mempoolUrl);
-    if (!response.ok) throw new Error(`Mempool API returned status ${response.status}`);
-
-    const data = await response.json();
-    const confirmed = data.chain_stats.funded_txo_sum || 0;
-    const unconfirmed = data.mempool_stats.funded_txo_sum || 0;
-    const totalReceived = confirmed + unconfirmed;
-
-    const targetSats = invoiceData.amount_sats;
-    const tolerance = gitPaySettings.tolerance || 99.5;
-    const thresholdSats = targetSats * (tolerance / 100);
-
-    if (totalReceived >= thresholdSats) {
-      showToast(`Payment of ${totalReceived} sats detected! Updating ledger...`, 'success');
-      await confirmPaymentOnGitHub(issueNumber, invoiceData, totalReceived, confirmed >= thresholdSats);
-      
-      // Ping worker if URL is configured
-      if (gitPaySettings.workerUrl) {
-        fetch(`${gitPaySettings.workerUrl}/check`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ issue_number: issueNumber })
-        }).catch(err => console.warn('Worker sync error:', err));
-      }
-    } else {
-      // Expiry check
-      const timeElapsed = Date.now() - invoiceData.created_at;
-      const expiryLimit = 15 * 60 * 1000;
-      
-      if (timeElapsed > expiryLimit) {
-        showToast('Invoice expired. Closing ledger...', 'info');
-        await markExpiredOnGitHub(issueNumber, invoiceData);
-        
-        if (gitPaySettings.workerUrl) {
-          fetch(`${gitPaySettings.workerUrl}/check`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ issue_number: issueNumber })
-          }).catch(err => console.warn('Worker sync error:', err));
-        }
-      } else {
-        const minutesLeft = Math.round((expiryLimit - timeElapsed) / 60000);
-        showToast(`Still pending: ${totalReceived.toLocaleString()} / ${targetSats.toLocaleString()} sats received. ~${minutesLeft}m left.`, 'info');
-      }
-    }
-  } catch (err) {
-    showToast(`Verification failed: ${err.message}`, 'danger');
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = `<i data-lucide="refresh-cw" style="width: 12px; height: 12px;"></i> Verify`;
-      lucide.createIcons();
-    }
-  }
-}
-
-async function markExpiredOnGitHub(issueNumber, invoice) {
-  const [owner, repo] = gitPaySettings.ghRepo.split('/');
-  const token = gitPaySettings.ghToken;
-  try {
-    await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}/comments`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify({
-        body: `⏰ **Invoice Expired (Manual Refresh Check)**\n\nNo payment was detected within the 15-minute window. This invoice is now closed.`
-      })
-    });
-
-    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${issueNumber}`, {
-      method: 'PATCH',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/vnd.github.v3+json'
-      },
-      body: JSON.stringify({
-        labels: ['expired', 'invoice'],
-        state: 'closed'
-      })
-    });
-
-    if (response.ok) {
-      showToast(`Invoice #${issueNumber} marked as Expired & closed!`, 'info');
-      syncInvoicesList();
-    }
-  } catch (err) {
-    console.error('Failed to mark expired on GitHub:', err);
-  }
 }

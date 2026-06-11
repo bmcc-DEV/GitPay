@@ -18,6 +18,8 @@
   <!-- Libraries -->
   <!-- Our compiled BIP32/BitcoinJS library -->
   <script src="js/bitcoin.min.js"></script>
+  <!-- Nostr client -->
+  <script src="js/nostr.js"></script>
   <!-- QRCode.js -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <!-- Lucide Icons -->
@@ -190,24 +192,35 @@
         <h2 class="card-title"><i data-lucide="settings"></i> Gateway Settings</h2>
         
         <form id="settings-form" onsubmit="handleSaveSettings(event)">
-          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; letter-spacing: 0.05em;">GitHub Configuration</h3>
+          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; letter-spacing: 0.05em;">Nostr Configuration</h3>
           
           <div class="form-group">
-            <label class="form-label" for="setting-gh-token">Personal Access Token (PAT)</label>
-            <div class="input-wrapper">
-              <i class="input-icon" data-lucide="key"></i>
-              <input type="password" id="setting-gh-token" class="form-input" placeholder="ghp_..." required>
+            <label class="form-label" for="setting-nostr-nsec">Store Private Key (nsec / Hex)</label>
+            <div class="input-wrapper" style="gap: 0.5rem; display: flex; width: 100%;">
+              <div style="flex: 1; position: relative;">
+                <i class="input-icon" data-lucide="key"></i>
+                <input type="password" id="setting-nostr-nsec" class="form-input" style="padding-left: 2.75rem;" placeholder="nsec... or 32-byte hex" oninput="deriveNostrPubKey()" required>
+              </div>
+              <button type="button" class="btn" style="padding: 0.75rem;" onclick="triggerGenerateNostrKeys()" title="Generate New Keypair">
+                <i data-lucide="refresh-cw"></i>
+              </button>
             </div>
-            <span class="form-helper">Requires a token with <code>repo</code> (or <code>public_repo</code>) permission to write issues and labels. Saved securely in local storage.</span>
+            <span class="form-helper">Used to sign invoices. Keep this key secret and backed up!</span>
           </div>
 
           <div class="form-group">
-            <label class="form-label" for="setting-gh-repo">Repository Path</label>
+            <label class="form-label" for="setting-nostr-npub">Store Public Key (npub / Hex)</label>
             <div class="input-wrapper">
-              <i class="input-icon" data-lucide="git-branch"></i>
-              <input type="text" id="setting-gh-repo" class="form-input" placeholder="yourusername/yourrepo" required>
+              <i class="input-icon" data-lucide="user"></i>
+              <input type="text" id="setting-nostr-npub" class="form-input" readonly placeholder="npub...">
             </div>
-            <span class="form-helper">The owner/repo combination where invoice Issues will be published. (e.g. <code>satoshi/gitpay</code>)</span>
+            <span class="form-helper">Public identifier for your store invoices. Share this.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" for="setting-nostr-relays">Nostr Relays (One per line)</label>
+            <textarea id="setting-nostr-relays" class="form-input" style="height: 100px; font-family: monospace; font-size: 0.85rem;" placeholder="wss://nos.lol&#10;wss://relay.damus.io&#10;wss://relay.snort.social" required></textarea>
+            <span class="form-helper">List of relays to publish and sync invoices.</span>
           </div>
 
           <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Bitcoin Wallet</h3>
@@ -263,16 +276,6 @@
             </div>
             <span class="form-helper">The percentage of the invoice value that must be received to mark it as fully paid (e.g. 99.5% tolerates small wallet fee deductions).</span>
           </div>
-          <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Cloudflare Worker (24/7 Sync)</h3>
-          <div class="form-group">
-            <label class="form-label" for="setting-worker-url">Cloudflare Worker URL</label>
-            <div class="input-wrapper">
-              <i class="input-icon" data-lucide="server"></i>
-              <input type="url" id="setting-worker-url" class="form-input" placeholder="https://gitpay-worker.username.workers.dev">
-            </div>
-            <span class="form-helper">Optional serverless Worker URL to monitor payments 24/7 and send notifications when the dashboard is closed.</span>
-          </div>
-
           <h3 style="font-size: 1rem; text-transform: uppercase; color: var(--accent-color); margin-bottom: 1rem; margin-top: 2rem; letter-spacing: 0.05em;">Notifications (Local Fallback)</h3>
           <span class="form-helper" style="margin-bottom: 1rem; display: block; color: var(--text-secondary);">Configure alerts triggered directly from your browser when the Dashboard confirms a payment locally (bypasses GitHub Actions).</span>
 

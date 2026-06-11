@@ -131,8 +131,52 @@ function deriveAddressFromExtendedKey({ extendedKey, index, type, networkType })
   };
 }
 
+const crypto = require('crypto');
+
+function generateNostrPrivateKey() {
+  let privKey;
+  do {
+    privKey = crypto.randomBytes(32);
+  } while (!ecc.isPrivate(privKey));
+  return privKey.toString('hex');
+}
+
+function getNostrPublicKey(privateKeyHex) {
+  const privKey = Buffer.from(privateKeyHex, 'hex');
+  const pubKey = ecc.xOnlyPointFromScalar(privKey);
+  return Buffer.from(pubKey).toString('hex');
+}
+
+function getEventHash(event) {
+  const serialized = JSON.stringify([
+    0,
+    event.pubkey,
+    event.created_at,
+    event.kind,
+    event.tags,
+    event.content
+  ]);
+  return crypto.createHash('sha256').update(serialized).digest();
+}
+
+function signNostrEvent(event, privateKeyHex) {
+  const privKey = Buffer.from(privateKeyHex, 'hex');
+  if (!event.pubkey) {
+    event.pubkey = getNostrPublicKey(privateKeyHex);
+  }
+  const hash = getEventHash(event);
+  const sig = ecc.signSchnorr(hash, privKey);
+  event.id = hash.toString('hex');
+  event.sig = Buffer.from(sig).toString('hex');
+  return event;
+}
+
 module.exports = {
   deriveAddress: deriveAddressFromExtendedKey,
   bitcoinPayments: bitcoin.payments,
-  bitcoinNetworks: bitcoin.networks
+  bitcoinNetworks: bitcoin.networks,
+  generateNostrPrivateKey,
+  getNostrPublicKey,
+  signNostrEvent
 };
+
